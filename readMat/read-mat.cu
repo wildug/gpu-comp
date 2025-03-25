@@ -116,41 +116,40 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
 
     __syncthreads();
     
-    if (threadNo < rows){
+    if (threadNo == 1){ // TODO CHANGED FOR DEBUGGING REMOVE
+    // if (threadNo < rows){
         cursor = cursors[threadNo];
-        head = payload[cursor] << 16 | payload[cursor];
+        head = payload[cursor] << 16 | payload[cursor+1];
         cursor +=2;
         for (int j = 0; j < cols; j++){
             quantile = head & ((1<<8)-1); // take first 8 bits of head as quantile
             if (threadNo == 1){
-                printf("quntile: %d ", quantile);
+                printf("head: %u\n", head);
+                printf("payload: [");
+                for (uint32_t q = 0; q < 5; q++) {
+                    printf("%i, ",payload[cursor+q]);
+                }
+                printf("]\n");
             }
             r = find_r(quantile, cdf, G);
             if (r<0){
-                printf("quntile: %d ", quantile);
                 printf("ERRROR");
             }
 
             w = min_value + r;
-            if (threadNo == 1){
-                printf("r: %d ",r);
-                if (j==6){
-                    printf("\n");
-                    // printf("cursors: ");
-                    // for (int q = 0; q <10; q++) {
-                    //     printf("%d ",cursors[q]);
-                    // }
-                    // printf("\n");
-                    return;
-                }
-            }
+            printf("w: %d \n",w);
 
             res += w * vec[j]; // perform scalar addition
 
             head = (head >> 8) * (cdf[r+1] - cdf[r]) + (quantile -cdf[r]);
             if (head < (2<<16)){
+                printf("HIIII\n");
                 head = head<<16 | payload[cursor];
                 cursor+=1;
+            }
+            if (j==20){ //REMOVE
+                printf("BREAK####\n");
+                break;
             }
         }
         dst[threadNo] = res;
@@ -212,13 +211,14 @@ int main() {
         checkCUDAError("after decompress");
         vec = d_result;
 
-        std::cout << "Rows: " << matrix.rows << std::endl;
-        std::cout << "Columns: " << matrix.cols << std::endl;
-        printf("Min value %i\n", matrix.min_value);
+        // std::cout << "Rows: " << matrix.rows << std::endl;
+        // std::cout << "Columns: " << matrix.cols << std::endl;
+        // printf("Min value %i\n", matrix.min_value);
         assert(matrix.rows == 1024);
         assert(matrix.cols == 1024);
         rows = matrix.rows;
-        break;
+
+        break; //REMOVE
     }
 
     // Close the file
