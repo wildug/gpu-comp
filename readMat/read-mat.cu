@@ -142,12 +142,12 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
             res += w * vec[j]; // perform scalar addition
 
             head = (head >> 8) * (cdf[r+1] - cdf[r]) + (quantile -cdf[r]);
-            if (head < (2<<16)){
+            if (head < (1<<16)){
                 printf("HIIII\n");
                 head = head<<16 | payload[cursor];
                 cursor+=1;
             }
-            if (j==20){ //REMOVE
+            if (j==30){ //REMOVE
                 printf("BREAK####\n");
                 break;
             }
