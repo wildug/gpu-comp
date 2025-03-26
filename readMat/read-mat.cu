@@ -14,12 +14,14 @@
 void checkCUDAError(const char* msg);
 
 __inline__ __device__ int8_t find_r(uint8_t quantile, uint8_t* cdf, int G){
-    for (int8_t r=0; r<=G; r++){
-        if (cdf[r] <= quantile && quantile < cdf[r+1]){
-            return r;
+
+
+    for (int8_t r=G; r>0; r--){
+        if (cdf[r-1] <= quantile){
+            return r-1;
         }
     }
-    return G+1;
+    // return G;
 };
 
 
@@ -100,12 +102,14 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
     uint8_t quantile;
     int8_t r;
     int8_t w;
+    uint8_t prob;
+
     extern __shared__ uint8_t cdf[]; // store cdf in shared memory
 
     int8_t res = 0;
 
     // loads cdf into shared memory 
-    for (int j = tId; j <=G; j+=blockSize ){
+    for (int j = tId; j <G+2; j+=blockSize ){
         cdf[j] = cdf_data[j];
     }
 
@@ -115,10 +119,16 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
         cursor = cursors[threadNo];
         head = payload[cursor] << 16 | payload[cursor+1];
         cursor +=2;
+        // if (threadNo == 1){
+        //     printf("G: %d\n",G);
+        //     for (int8_t r=G; r>=0; r--){
+        //         printf("cdf[%d] = %d\n",r,cdf[r]);
+        //     }
+        // }
         for (int j = 0; j < cols; j++){
             quantile = head & ((1<<8)-1); // take first 8 bits of head as quantile
 
-            // if (threadNo == 1){
+            // if (threadNo == 1 && j< 30){
             //     printf("head: %u\n", head);
             //     printf("payload: [");
             //     for (uint32_t q = 0; q < 5; q++) {
@@ -126,6 +136,7 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
             //     }
             //     printf("]\n");
             // }
+
             r = find_r(quantile, cdf, G);
             if (r<0){
                 printf("ERRROR");
@@ -133,11 +144,14 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
             }
 
             w = min_value + r;
-            // printf("w: %d, col: %d \n",w, j);
+
+            if (threadNo == 1 && j< 30)
+                printf("w: %d, col: %d \n",w, j);
 
             res += w * vec[j]; // perform scalar addition
 
-            head = (head >> 8) * (cdf[r+1] - cdf[r]) + (quantile -cdf[r]);
+            prob = (cdf[r+1] - cdf[r]) % (1<<8);
+            head = (head >> 8) * prob  + (quantile -cdf[r]);
             if (head < (1<<16)){
                 head = head<<16 | payload[cursor];
                 cursor+=1;
@@ -209,7 +223,7 @@ int main() {
         assert(matrix.rows == 1024);
         assert(matrix.cols == 1024);
         rows = matrix.rows;
-
+        // break; //REMOVE
     }
 
     // Close the file
