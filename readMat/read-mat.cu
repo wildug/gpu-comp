@@ -19,7 +19,7 @@ __inline__ __device__ int8_t find_r(uint8_t quantile, uint8_t* cdf, int G){
             return r;
         }
     }
-    return -1;
+    return G+1;
 };
 
 
@@ -40,11 +40,6 @@ public:
         : rows(r), cols(c), grid_spacing(gs), cursors(cur), min_value(minVal), G(G),
           cdf_data(cdf), payload(pay), payload_size(pay_size) {}
 
-    ~CompressedMatrix() {
-        cudaFree(cursors);
-        cudaFree(cdf_data);
-        cudaFree(payload);
-    }
 
     __host__ static CompressedMatrix deserialize(std::ifstream& file) {
         uint32_t rows, cols;
@@ -116,40 +111,36 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
 
     __syncthreads();
     
-    if (threadNo == 1){ // TODO CHANGED FOR DEBUGGING REMOVE
-    // if (threadNo < rows){
+    if (threadNo < rows){
         cursor = cursors[threadNo];
         head = payload[cursor] << 16 | payload[cursor+1];
         cursor +=2;
         for (int j = 0; j < cols; j++){
             quantile = head & ((1<<8)-1); // take first 8 bits of head as quantile
-            if (threadNo == 1){
-                printf("head: %u\n", head);
-                printf("payload: [");
-                for (uint32_t q = 0; q < 5; q++) {
-                    printf("%i, ",payload[cursor+q]);
-                }
-                printf("]\n");
-            }
+
+            // if (threadNo == 1){
+            //     printf("head: %u\n", head);
+            //     printf("payload: [");
+            //     for (uint32_t q = 0; q < 5; q++) {
+            //         printf("%i, ",payload[cursor+q]);
+            //     }
+            //     printf("]\n");
+            // }
             r = find_r(quantile, cdf, G);
             if (r<0){
                 printf("ERRROR");
+                printf("%d", quantile);
             }
 
             w = min_value + r;
-            printf("w: %d \n",w);
+            // printf("w: %d, col: %d \n",w, j);
 
             res += w * vec[j]; // perform scalar addition
 
             head = (head >> 8) * (cdf[r+1] - cdf[r]) + (quantile -cdf[r]);
             if (head < (1<<16)){
-                printf("HIIII\n");
                 head = head<<16 | payload[cursor];
                 cursor+=1;
-            }
-            if (j==30){ //REMOVE
-                printf("BREAK####\n");
-                break;
             }
         }
         dst[threadNo] = res;
@@ -208,7 +199,8 @@ int main() {
         cudaMalloc(&d_result, sizeof(uint8_t)* matrix.rows);
 
         matrix.decompressAndMult(d_result, vec);
-        checkCUDAError("after decompress");
+        cudaDeviceSynchronize();
+        checkCUDAError("after decompressing matrix");
         vec = d_result;
 
         // std::cout << "Rows: " << matrix.rows << std::endl;
@@ -218,7 +210,6 @@ int main() {
         assert(matrix.cols == 1024);
         rows = matrix.rows;
 
-        break; //REMOVE
     }
 
     // Close the file
@@ -226,12 +217,17 @@ int main() {
 
     int8_t* h_result = new int8_t[rows];
 
+    checkCUDAError("Before Memcpy.");
+
     cudaMemcpy(h_result, d_result, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
 
     // show result
-    // for (int i=0; i<10; i++){
-    //     printf("Result at index %d: %d\n", i, h_result[i]);
-    // }
+    for (int i=0; i<10; i++){
+        printf("Result at index %d: %d\n", i, h_result[i]);
+    }
+    cudaFree(d_result);
+    delete[] h_result;
+
     checkCUDAError("End of program.");
     
     return 0;
