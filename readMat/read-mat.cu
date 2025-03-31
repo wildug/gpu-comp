@@ -1,12 +1,13 @@
 #include <cassert>
+#include <cstddef>
 #include <cstdio>
 #include <fstream>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <cuda_runtime.h>
+#include <vector>
 
-// TODO think about allocating things on gpu 
 
 #define MAX_BLOCKS 256
 #define MAX_THREADS 256
@@ -15,13 +16,12 @@ void checkCUDAError(const char* msg);
 
 __inline__ __device__ int8_t find_r(uint8_t quantile, uint8_t* cdf, int G){
 
-
     for (int8_t r=G; r>0; r--){
         if (cdf[r-1] <= quantile){
             return r-1;
         }
     }
-    // return G;
+    return -1;
 };
 
 
@@ -34,13 +34,14 @@ public:
     int8_t min_value;
     uint8_t G;
     uint8_t* cdf_data;
+    uint8_t* ppf_data;
     uint16_t* payload;
     uint32_t payload_size;
 
     CompressedMatrix(uint32_t r, uint32_t c, float gs, uint32_t* cur,
-                      int8_t minVal, uint8_t G, uint8_t* cdf, uint16_t* pay, uint32_t pay_size)
+                      int8_t minVal, uint8_t G, uint8_t* cdf, uint8_t* ppf, uint16_t* pay, uint32_t pay_size)
         : rows(r), cols(c), grid_spacing(gs), cursors(cur), min_value(minVal), G(G),
-          cdf_data(cdf), payload(pay), payload_size(pay_size) {}
+          cdf_data(cdf), ppf_data(ppf), payload(pay), payload_size(pay_size) {}
 
 
     __host__ static CompressedMatrix deserialize(std::ifstream& file) {
@@ -72,6 +73,10 @@ public:
             file.seekg(1, std::ios::cur);
         }
 
+        uint8_t* ppf_data;
+        cudaMallocManaged(&ppf_data, 256*sizeof(uint8_t));
+        file.read( reinterpret_cast<char*>(ppf_data), 256);
+        
         uint16_t* payload;
         cudaMallocManaged(&payload, payload_size * sizeof(uint16_t));
         file.read(reinterpret_cast<char*>(payload), payload_size * sizeof(uint16_t));
@@ -80,7 +85,7 @@ public:
             file.seekg(2, std::ios::cur);
         }
 
-        return CompressedMatrix(rows, cols, grid_spacing, cursors, min_value, G, cdf_data, payload, payload_size);
+        return CompressedMatrix(rows, cols, grid_spacing, cursors, min_value, G, cdf_data, ppf_data, payload, payload_size);
     }
 
     int8_t* decompressAndMult(int8_t* result, int8_t* vector);
@@ -89,7 +94,7 @@ public:
 __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
      uint32_t rows, uint32_t cols, float grid_spacing,
      uint32_t* cursors, int8_t min_value, uint8_t G,
-     uint8_t* cdf_data, uint16_t* payload, uint32_t payload_size
+     uint8_t* cdf_data, uint8_t* ppf_data, uint16_t* payload, uint32_t payload_size
 ){
     unsigned int threadNo = blockDim.x * blockIdx.x + threadIdx.x;
     unsigned int tId = threadIdx.x;
@@ -105,12 +110,16 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
     uint8_t prob;
 
     extern __shared__ uint8_t cdf[]; // store cdf in shared memory
+    __shared__ uint8_t ppf[256];
 
     int8_t res = 0;
 
-    // loads cdf into shared memory 
+    // loads cdf & ppf into shared memory 
     for (int j = tId; j <G+2; j+=blockSize ){
         cdf[j] = cdf_data[j];
+    }
+    for (int j=tId; j< 256; j+=blockSize){
+        ppf[j] = ppf_data[j];
     }
 
     __syncthreads();
@@ -119,38 +128,17 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
         cursor = cursors[threadNo];
         head = payload[cursor] << 16 | payload[cursor+1];
         cursor +=2;
-        // if (threadNo == 1){
-        //     printf("G: %d\n",G);
-        //     for (int8_t r=G; r>=0; r--){
-        //         printf("cdf[%d] = %d\n",r,cdf[r]);
-        //     }
-        // }
         for (int j = 0; j < cols; j++){
             quantile = head & ((1<<8)-1); // take first 8 bits of head as quantile
 
-            // if (threadNo == 1 && j< 30){
-            //     printf("head: %u\n", head);
-            //     printf("payload: [");
-            //     for (uint32_t q = 0; q < 5; q++) {
-            //         printf("%i, ",payload[cursor+q]);
-            //     }
-            //     printf("]\n");
-            // }
-
-            r = find_r(quantile, cdf, G);
-            if (r<0){
-                printf("ERRROR");
-                printf("%d", quantile);
-            }
+            r = ppf[quantile];
 
             w = min_value + r;
 
-            if (threadNo == 1 && j< 30)
-                printf("w: %d, col: %d \n",w, j);
 
             res += w * vec[j]; // perform scalar addition
 
-            prob = (cdf[r+1] - cdf[r]) % (1<<8);
+            prob = (cdf[r+1] - cdf[r]) % (1<<8); // modulo 2**8 to ensure it fits in a uint8
             head = (head >> 8) * prob  + (quantile -cdf[r]);
             if (head < (1<<16)){
                 head = head<<16 | payload[cursor];
@@ -166,9 +154,9 @@ int8_t* CompressedMatrix::decompressAndMult(int8_t* result, int8_t* vector){
     dim3 threadBlock(MAX_THREADS);
 
     decmpressAndMultiply<<<blockGrid, threadBlock, (G+1)*sizeof(int8_t)>>>(result, vector,
-         this->rows, this->cols, this->grid_spacing,
-          this-> cursors, this->min_value, this->G,
-this->cdf_data, this->payload, this->payload_size);
+        this->rows, this->cols, this->grid_spacing,
+        this-> cursors, this->min_value, this->G,
+        this->cdf_data,this->ppf_data, this->payload, this->payload_size);
 
 
     checkCUDAError("after kernel");
@@ -181,6 +169,12 @@ int main() {
     std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
     std::ifstream file(filename, std::ios::binary);
     
+    // for timing
+    float ms = 0;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
     if (!file) {
         std::cerr << "Error: Could not open file" << std::endl;
         return 1;
@@ -199,21 +193,29 @@ int main() {
     std::cout << "Number of matrices: " << num_matrices << std::endl;
     std::cout << "Max word-count: " << max_word_count << std::endl;
     std::cout << "len_v: " << len_v << std::endl;
-    printf("v[0]: %d\n", vec[0]);
-    printf("v[1]: %d\n", vec[1]);
 
 
 
     // maybe first read all files and then do the mat vec operation
     int8_t* d_result;
     int rows;
-    for (int k = 0; k<num_matrices; k++){
+    std::vector<CompressedMatrix> encoded_matrices;
 
+    for (int k = 0; k<num_matrices; k++){
         CompressedMatrix matrix = CompressedMatrix::deserialize(file);
+        encoded_matrices.push_back(std::move(matrix));
+    }
+
+
+    file.close();
+    
+    cudaEventRecord(start);
+
+    for (int k = 0; k<num_matrices; k++){
+        CompressedMatrix matrix = encoded_matrices[k];
         cudaMalloc(&d_result, sizeof(uint8_t)* matrix.rows);
 
         matrix.decompressAndMult(d_result, vec);
-        cudaDeviceSynchronize();
         checkCUDAError("after decompressing matrix");
         vec = d_result;
 
@@ -223,11 +225,10 @@ int main() {
         assert(matrix.rows == 1024);
         assert(matrix.cols == 1024);
         rows = matrix.rows;
-        // break; //REMOVE
     }
 
+
     // Close the file
-    file.close();
 
     int8_t* h_result = new int8_t[rows];
 
@@ -235,10 +236,18 @@ int main() {
 
     cudaMemcpy(h_result, d_result, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
 
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+
+    printf("%f ms\n", ms);
     // show result
-    for (int i=0; i<10; i++){
-        printf("Result at index %d: %d\n", i, h_result[i]);
+    printf("[");
+    for (int i=0; i<rows; i++){
+        // printf("Result at index %d: %d\n", i, h_result[i]);
+        printf("%d,",  h_result[i]);
     }
+    printf("]\n");
     cudaFree(d_result);
     delete[] h_result;
 
