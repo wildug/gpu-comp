@@ -181,14 +181,15 @@ int main() {
     }
 
     uint32_t num_matrices, max_word_count, len_v;
+    int8_t* v0;
     int8_t* vec;
     file.read(reinterpret_cast<char*>(&num_matrices), sizeof(num_matrices));
     file.read(reinterpret_cast<char*>(&max_word_count), sizeof(max_word_count));
     file.read(reinterpret_cast<char*>(&len_v), sizeof(len_v));
 
-    cudaMallocManaged(&vec, len_v * sizeof(uint8_t));
+    cudaMallocManaged(&v0, len_v * sizeof(uint8_t));
 
-    file.read(reinterpret_cast<char*>(vec), len_v*sizeof(uint8_t));
+    file.read(reinterpret_cast<char*>(v0), len_v*sizeof(uint8_t));
 
     std::cout << "Number of matrices: " << num_matrices << std::endl;
     std::cout << "Max word-count: " << max_word_count << std::endl;
@@ -198,6 +199,7 @@ int main() {
 
     // maybe first read all files and then do the mat vec operation
     int8_t* d_result;
+    int8_t* h_result;
     int rows;
     std::vector<CompressedMatrix> encoded_matrices;
 
@@ -209,38 +211,40 @@ int main() {
 
     file.close();
     
-    cudaEventRecord(start);
+    for (int l=0; l< 1; l++){ // outer loop for benchmarking
+        cudaEventRecord(start);
 
-    for (int k = 0; k<num_matrices; k++){
-        CompressedMatrix matrix = encoded_matrices[k];
-        cudaMalloc(&d_result, sizeof(uint8_t)* matrix.rows);
+        vec = v0;
 
-        matrix.decompressAndMult(d_result, vec);
-        checkCUDAError("after decompressing matrix");
-        vec = d_result;
+        for (int k = 0; k<num_matrices; k++){
+            CompressedMatrix matrix = encoded_matrices[k];
+            cudaMalloc(&d_result, sizeof(uint8_t)* matrix.rows); //TODO allocate outside the loop
 
-        // std::cout << "Rows: " << matrix.rows << std::endl;
-        // std::cout << "Columns: " << matrix.cols << std::endl;
-        // printf("Min value %i\n", matrix.min_value);
-        assert(matrix.rows == 1024);
-        assert(matrix.cols == 1024);
-        rows = matrix.rows;
+            matrix.decompressAndMult(d_result, vec);
+            checkCUDAError("after decompressing matrix");
+            vec = d_result;
+
+            // std::cout << "Rows: " << matrix.rows << std::endl;
+            // std::cout << "Columns: " << matrix.cols << std::endl;
+            // printf("Min value %i\n", matrix.min_value);
+            assert(matrix.rows == 1024*4);
+            assert(matrix.cols == 1024*4);
+            rows = matrix.rows;
+        }
+
+
+        h_result = new int8_t[rows];
+
+        checkCUDAError("Before Memcpy.");
+
+        cudaMemcpy(h_result, d_result, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
+
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&ms, start, stop);
+
+        printf("%f ms\n", ms);
     }
-
-
-    // Close the file
-
-    int8_t* h_result = new int8_t[rows];
-
-    checkCUDAError("Before Memcpy.");
-
-    cudaMemcpy(h_result, d_result, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
-
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&ms, start, stop);
-
-    printf("%f ms\n", ms);
     // show result
     printf("[");
     for (int i=0; i<rows; i++){
