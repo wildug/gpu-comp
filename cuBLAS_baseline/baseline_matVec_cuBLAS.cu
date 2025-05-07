@@ -11,6 +11,11 @@
 #include <fstream>
 #include <vector>
 
+#include <thrust/device_vector.h>
+#include <thrust/transform_reduce.h>
+#include <thrust/functional.h>
+#include <cmath>
+
 #define EPSILON 1e-5 
 #define MAX_BLOCKS 256
 #define MAX_THREADS 256
@@ -20,13 +25,40 @@
 bool validateResults(float* hostMat, float* hostVec, float* hostResVec, int w, int h);
 void checkCUDAError(const char* msg);
 
+struct AbsValue {
+    __host__ __device__
+    float operator()(const float& x) const {
+        return fabsf(x);
+    }
+};
+
+float absMaxWithThrustDevice(float* d_input, int n) {
+    thrust::device_ptr<float> dev_ptr(d_input);
+
+    return thrust::transform_reduce(
+        dev_ptr, dev_ptr + n,
+        AbsValue(),              // transform: fabs(x)
+        0.0f,                    // init
+        thrust::maximum<float>() // reduce: max
+    );
+}
+
+__global__ void normalizeAndRound(float* vec, float scalar, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        vec[idx] = roundf(vec[idx]/ scalar);
+    }
+}
+
+
 class Matrix{
 public:
     uint32_t rows;
     uint32_t cols;
+    float w_delta;
     float* data;
 
-    Matrix(uint32_t r, uint32_t c, float* d) : rows(r), cols(c), data(d) {}
+    Matrix(uint32_t r, uint32_t c, float w_delta, float* d) : rows(r), cols(c), w_delta(w_delta), data(d) {}
 
     __host__ static Matrix deserialize(std::ifstream& file){
         uint32_t rows, cols;
@@ -56,15 +88,18 @@ public:
 
         delete [] int_data;
 
-        return Matrix(rows, cols, data);
+        return Matrix(rows, cols, grid_spacing, data);
     }
     
-    float* mult(cublasHandle_t handle, float* result, float* vector);
+    float mult(cublasHandle_t handle, float* result, float* vector, float v_delta);
 };
-float* Matrix::mult(cublasHandle_t handle, float* result, float* vector){
-    float alpha = 1.0f;  // Scalar multiplier for matrix-vector product
+
+float Matrix::mult(cublasHandle_t handle, float* result, float* vector, float v_delta){
+    // returns float value 
+
+    float alpha = this->w_delta * v_delta;  // Scale of vector and matrix quantization
     float beta = 0.0f;   // Scalar multiplier for the initial value of y (should be 0 if we're just doing the product)
-    int lda = this->rows;         // Leading dimension of matrix A
+    int rows = this->rows;         // Leading dimension of matrix A
     int incx = 1;        // Increment for vector x
     int incy = 1;        // Increment for vector y
     int num_elems = this->cols*this->rows;
@@ -72,28 +107,39 @@ float* Matrix::mult(cublasHandle_t handle, float* result, float* vector){
 
     float* tmp = new float[num_elems];
 
-    cudaMemcpy(tmp,this->data, sizeof(float)*lda, cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp,this->data, sizeof(float)*rows, cudaMemcpyDeviceToHost);
     printf("#+#+#+#+#");
     printf("%f\n",tmp[0]);
 
     cublasStatus_t stat;
     checkCUDAError("Before Sgemv");
-    stat = cublasSgemv(handle, CUBLAS_OP_N, this->rows, this->cols, &alpha, this->data, lda, vector, incx, &beta, result, incy);
+
+    stat = cublasSgemv(handle, CUBLAS_OP_N, rows, this->cols, &alpha, this->data, rows, vector, incx, &beta, result, incy);
+    
     checkCUDAError("after Sgemv");
+    float abs_max = absMaxWithThrustDevice(result, this->rows);
+
+    v_delta = abs_max / 127;
+
+    int blocks = (rows+ MAX_THREADS - 1) / MAX_THREADS;
+
+    normalizeAndRound<<< blocks,MAX_THREADS>>>    (result, v_delta, rows);
+    checkCUDAError("after normalizeAndRound");
+
+
     if (stat != CUBLAS_STATUS_SUCCESS) {
         printf("ERROR CUBLAS_STATUS_SUCCESS)");
     }
 
-    cudaMemcpy(tmp,result, sizeof(float)*lda, cudaMemcpyDeviceToHost);
+    cudaMemcpy(tmp,result, sizeof(float)*rows, cudaMemcpyDeviceToHost);
     checkCUDAError("after tmp memcpy");
 
     printf("####");
     printf("%f\n",tmp[0]);
     delete[] tmp;
 
-    return result;
+    return v_delta;
 }
-
 int main(int argc, char* argv[]) {
 
     std::string filename = "/home/wildug/RSP/myKernel/raw-matrices.bin";
@@ -136,11 +182,8 @@ int main(int argc, char* argv[]) {
     cudaMalloc(&vec, sizeof(float)*len_v);
     cudaMemcpy(vec, h_vec, sizeof(float)*len_v,cudaMemcpyHostToDevice);
 
-
-
     checkCUDAError("after Reading");
 
-    
     std::vector<Matrix> matrices;
     for (int k = 0; k<num_matrices; k++){
         printf("%d\n",k);
@@ -179,12 +222,14 @@ int main(int argc, char* argv[]) {
 
     checkCUDAError("after allocating d_result");
     int rows;
+    int v_delta = 1; // scaling factor of v starts with 1
+
     for (int k = 0; k<num_matrices; k++){
         Matrix matrix = matrices[k];
         rows = matrix.rows;
         float* d_result;
         cudaMalloc(&d_result, sizeof(float)* rows); //TODO allocate outside the loop
-        matrix.mult(handle, d_result, vec);
+        v_delta = matrix.mult(handle, d_result, vec, v_delta);
 
         checkCUDAError("after multiplying matrix");
         vec = d_result;
