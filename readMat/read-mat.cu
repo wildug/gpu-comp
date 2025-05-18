@@ -105,7 +105,7 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
     uint32_t cursor;
     uint32_t head;
     uint8_t quantile;
-    int8_t r;
+    uint8_t r;
     int8_t w;
     uint8_t prob;
 
@@ -115,7 +115,7 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
     int8_t res = 0;
 
     // loads cdf & ppf into shared memory 
-    for (int j = tId; j <G+2; j+=blockSize ){
+    for (int j = tId; j <G+1; j+=blockSize ){
         cdf[j] = cdf_data[j];
     }
     for (int j=tId; j< 256; j+=blockSize){
@@ -132,8 +132,11 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
             quantile = head & ((1<<8)-1); // take first 8 bits of head as quantile
 
             r = ppf[quantile];
+            // r = find_r(quantile, cdf, G);
+
 
             w = min_value + r;
+
 
 
             res += w * vec[j]; // perform scalar addition
@@ -166,7 +169,8 @@ int8_t* CompressedMatrix::decompressAndMult(int8_t* result, int8_t* vector){
 
 int main() {
     // Open the binary file
-    std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
+    // std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
+    std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
     std::ifstream file(filename, std::ios::binary);
     
     // for timing
@@ -200,7 +204,7 @@ int main() {
     // maybe first read all files and then do the mat vec operation
     int8_t* d_result;
     int8_t* h_result;
-    int rows;
+    int rows =len_v;
     std::vector<CompressedMatrix> encoded_matrices;
 
     for (int k = 0; k<num_matrices; k++){
@@ -210,6 +214,8 @@ int main() {
 
 
     file.close();
+
+    h_result = new int8_t[rows];
     
     for (int l=0; l< 1; l++){ // outer loop for benchmarking
         cudaEventRecord(start);
@@ -227,13 +233,13 @@ int main() {
             // std::cout << "Rows: " << matrix.rows << std::endl;
             // std::cout << "Columns: " << matrix.cols << std::endl;
             // printf("Min value %i\n", matrix.min_value);
-            assert(matrix.rows == 1024*4);
-            assert(matrix.cols == 1024*4);
+            assert(matrix.rows == 1024);
+            assert(matrix.cols == 1024);
+            checkCUDAError("sizes misalign");
             rows = matrix.rows;
         }
 
 
-        h_result = new int8_t[rows];
 
         checkCUDAError("Before Memcpy.");
 
