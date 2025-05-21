@@ -112,7 +112,7 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
     extern __shared__ uint8_t cdf[]; // store cdf in shared memory
     __shared__ uint8_t ppf[256];
 
-    int8_t res = 0;
+    int32_t res = 0;
 
     // loads cdf & ppf into shared memory 
     for (int j = tId; j <G+1; j+=blockSize ){
@@ -206,6 +206,7 @@ int main() {
     int8_t* d_result;
     int8_t* h_result;
     int rows =len_v;
+    int8_t* tmp;
     std::vector<CompressedMatrix> encoded_matrices;
 
     for (int k = 0; k<num_matrices; k++){
@@ -218,24 +219,32 @@ int main() {
 
     h_result = new int8_t[rows];
     
+
+    int max_rows;
+    for (int k = 0; k<num_matrices; k++){
+        if (max_rows < encoded_matrices[k].rows)              
+            max_rows = encoded_matrices[k].rows;
+    }
+
+    cudaMalloc(&d_result, sizeof(uint8_t)* max_rows); //TODO allocate outside the loop
+    
     for (int l=0; l< 1; l++){ // outer loop for benchmarking
+
         cudaEventRecord(start);
 
         vec = v0;
 
         for (int k = 0; k<num_matrices; k++){
             CompressedMatrix matrix = encoded_matrices[k];
-            cudaMalloc(&d_result, sizeof(uint8_t)* matrix.rows); //TODO allocate outside the loop
 
             matrix.decompressAndMult(d_result, vec);
             checkCUDAError("after decompressing matrix");
-            vec = d_result;
 
-            // std::cout << "Rows: " << matrix.rows << std::endl;
-            // std::cout << "Columns: " << matrix.cols << std::endl;
-            // printf("Min value %i\n", matrix.min_value);
-            // assert(matrix.rows == 1024);
-            // assert(matrix.cols == 1024);
+            tmp = vec;
+            vec = d_result;
+            d_result = tmp;
+
+
             checkCUDAError("sizes misalign");
             rows = matrix.rows;
         }
@@ -244,7 +253,7 @@ int main() {
 
         checkCUDAError("Before Memcpy.");
 
-        cudaMemcpy(h_result, d_result, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_result, vec, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
 
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);

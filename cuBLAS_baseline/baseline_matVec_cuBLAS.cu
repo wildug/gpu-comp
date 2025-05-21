@@ -207,7 +207,9 @@ int main(int argc, char* argv[]) {
 
     printf("max_rows: %d\n", max_rows);
 
-    // cudaMalloc(&d_result, sizeof(float)*max_rows);
+    float* d_result;
+    float* blob;
+    cudaMalloc(&d_result, sizeof(float)*max_rows);
 
     checkCUDAError("after allocating d_result");
     int rows;
@@ -216,12 +218,13 @@ int main(int argc, char* argv[]) {
     for (int k = 0; k<num_matrices; k++){
         Matrix matrix = matrices[k];
         rows = matrix.rows;
-        float* d_result;
-        cudaMalloc(&d_result, sizeof(float)* rows); //TODO allocate outside the loop
+        // cudaMalloc(&d_result, sizeof(float)* rows); //TODO allocate outside the loop
         v_delta = matrix.mult(handle, d_result, vec, v_delta);
 
         checkCUDAError("after multiplying matrix");
+        blob = vec;
         vec = d_result;
+        d_result = blob;
     }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
