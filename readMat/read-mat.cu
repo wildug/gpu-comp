@@ -226,7 +226,7 @@ int main() {
             max_rows = encoded_matrices[k].rows;
     }
 
-    cudaMalloc(&d_result, sizeof(uint8_t)* max_rows); //TODO allocate outside the loop
+    cudaMalloc(&d_result, sizeof(uint8_t)* max_rows); 
     
     for (int l=0; l< 1; l++){ // outer loop for benchmarking
 
@@ -240,6 +240,7 @@ int main() {
             matrix.decompressAndMult(d_result, vec);
             checkCUDAError("after decompressing matrix");
 
+            // to swap variables you need a third guy 'tmp'
             tmp = vec;
             vec = d_result;
             d_result = tmp;
@@ -253,6 +254,7 @@ int main() {
 
         checkCUDAError("Before Memcpy.");
 
+        // copy 'vec' since we swapped it with d_result
         cudaMemcpy(h_result, vec, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
 
         cudaEventRecord(stop);
