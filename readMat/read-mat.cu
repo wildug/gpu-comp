@@ -8,6 +8,9 @@
 #include <cuda_runtime.h>
 #include <vector>
 
+#include <thrust/device_vector.h>
+#include <thrust/transform_reduce.h>
+#include <thrust/functional.h>
 
 #define MAX_BLOCKS 256
 #define MAX_THREADS 256
@@ -24,6 +27,35 @@ __inline__ __device__ int8_t find_r(uint8_t quantile, uint8_t* cdf, int G){
     return -1;
 };
 
+struct AbsValue {
+    __host__ __device__
+    float operator()(const int32_t& x) const {
+        return abs(x);
+    }
+};
+
+float absMaxWithThrustDevice(int32_t* d_input, int n) {
+    thrust::device_ptr<int32_t> dev_ptr(d_input);
+
+    return thrust::transform_reduce(
+        dev_ptr, dev_ptr + n,
+        AbsValue(),              // transform: fabs(x)
+        0.0f,                    // init
+        thrust::maximum<int32_t>() // reduce: max
+    );
+}
+
+__global__ void normalizeAndRoundtoInt8(int32_t* res32, int8_t* res8, float scalar, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < n) {
+        int32_t a = res32[idx];
+        float afl = static_cast<float>(a);
+
+        a = __float2int_rn(afl/ scalar);
+        res8[idx] = static_cast<int8_t>(a);
+    }
+}
 
 
 class CompressedMatrix {
@@ -88,10 +120,10 @@ public:
         return CompressedMatrix(rows, cols, grid_spacing, cursors, min_value, G, cdf_data, ppf_data, payload, payload_size);
     }
 
-    int8_t* decompressAndMult(int8_t* result, int8_t* vector);
+    float decompressAndMult(int8_t* result, int32_t* d_result32, int8_t* vector, float v_delta);
 };
 
-__global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
+__global__ void decmpressAndMultiply(int32_t* dst, int8_t* vec,
      uint32_t rows, uint32_t cols, float grid_spacing,
      uint32_t* cursors, int8_t min_value, uint8_t G,
      uint8_t* cdf_data, uint8_t* ppf_data, uint16_t* payload, uint32_t payload_size
@@ -152,19 +184,28 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
         dst[threadNo] = res;
     }   
 }
-int8_t* CompressedMatrix::decompressAndMult(int8_t* result, int8_t* vector){
+float CompressedMatrix::decompressAndMult(int8_t* d_result8, int32_t* d_result32, int8_t* vector, float v_delta){
 
     dim3 blockGrid(MAX_BLOCKS);
     dim3 threadBlock(MAX_THREADS);
+    
+    
 
-    decmpressAndMultiply<<<blockGrid, threadBlock, (G+1)*sizeof(int8_t)>>>(result, vector,
+    decmpressAndMultiply<<<blockGrid, threadBlock, (G+1)*sizeof(int8_t)>>>(d_result32, vector,
         this->rows, this->cols, this->grid_spacing,
         this-> cursors, this->min_value, this->G,
         this->cdf_data,this->ppf_data, this->payload, this->payload_size);
 
 
+    float abs_max = absMaxWithThrustDevice(d_result32, this->rows);
+    v_delta = abs_max / 127;
+    
+    int blocks = (rows+ MAX_THREADS - 1) / MAX_THREADS;
+    normalizeAndRoundtoInt8<<< blocks,MAX_THREADS>>>
+    (d_result32, d_result8, v_delta, this->rows);
+
     checkCUDAError("after kernel");
-    return result;
+    return v_delta;
 }
 
 
@@ -226,18 +267,23 @@ int main() {
             max_rows = encoded_matrices[k].rows;
     }
 
-    cudaMalloc(&d_result, sizeof(uint8_t)* max_rows); 
+
+    cudaMalloc(&d_result, sizeof(int8_t)* max_rows); 
+
+    int32_t* d_result32;
+    cudaMalloc(&d_result32, sizeof(int32_t)* max_rows); 
     
     for (int l=0; l< 1; l++){ // outer loop for benchmarking
 
         cudaEventRecord(start);
 
+        float v_delta = 1;
         vec = v0;
 
         for (int k = 0; k<num_matrices; k++){
             CompressedMatrix matrix = encoded_matrices[k];
 
-            matrix.decompressAndMult(d_result, vec);
+            matrix.decompressAndMult(d_result, d_result32, vec, v_delta);
             checkCUDAError("after decompressing matrix");
 
             // to swap variables you need a third guy 'tmp'
