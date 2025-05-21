@@ -20,7 +20,7 @@
 #define MAX_BLOCKS 256
 #define MAX_THREADS 256
 
-// #define VERBOSE
+#define VERBOSE
 
 bool validateResults(float* hostMat, float* hostVec, float* hostResVec, int w, int h);
 void checkCUDAError(const char* msg);
@@ -105,11 +105,6 @@ float Matrix::mult(cublasHandle_t handle, float* result, float* vector, float v_
     int num_elems = this->cols*this->rows;
 
 
-    float* tmp = new float[num_elems];
-
-    cudaMemcpy(tmp,this->data, sizeof(float)*rows, cudaMemcpyDeviceToHost);
-    printf("#+#+#+#+#");
-    printf("%f\n",tmp[0]);
 
     cublasStatus_t stat;
     checkCUDAError("Before Sgemv");
@@ -130,13 +125,6 @@ float Matrix::mult(cublasHandle_t handle, float* result, float* vector, float v_
     if (stat != CUBLAS_STATUS_SUCCESS) {
         printf("ERROR CUBLAS_STATUS_SUCCESS)");
     }
-
-    cudaMemcpy(tmp,result, sizeof(float)*rows, cudaMemcpyDeviceToHost);
-    checkCUDAError("after tmp memcpy");
-
-    printf("####");
-    printf("%f\n",tmp[0]);
-    delete[] tmp;
 
     return v_delta;
 }
@@ -192,13 +180,13 @@ int main(int argc, char* argv[]) {
     }
 
     file.close();
+    cudaEventRecord(start);
+
     for (int k = 0; k<num_matrices; k++){
         Matrix& matrix = matrices[k];
         float* d_data;
         int num_elems = matrix.rows*matrix.cols;
 
-        printf("%d,",k);
-        printf("elms: %d, ",matrix.cols*matrix.rows);
         checkCUDAError("before Malloc");
         cudaMalloc((void**)&d_data, sizeof(float)*num_elems);
         checkCUDAError("after Malloc");
@@ -209,6 +197,7 @@ int main(int argc, char* argv[]) {
         matrix.data = d_data;
     }
 
+
     checkCUDAError("after loop");
     int max_rows = 0;
     for (const auto& matrix : matrices) {
@@ -216,7 +205,7 @@ int main(int argc, char* argv[]) {
             max_rows = matrix.rows;
     }
 
-    printf("max_rows: %d", max_rows);
+    printf("max_rows: %d\n", max_rows);
 
     // cudaMalloc(&d_result, sizeof(float)*max_rows);
 
@@ -234,6 +223,10 @@ int main(int argc, char* argv[]) {
         checkCUDAError("after multiplying matrix");
         vec = d_result;
     }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&ms, start, stop);
+    printf("%f ms\n", ms);
     
     cudaMemcpy(h_vec, vec, sizeof(float)*rows, cudaMemcpyDeviceToHost);
     cudaFree(vec);
@@ -242,16 +235,6 @@ int main(int argc, char* argv[]) {
         cudaFree(matrix.data);
     }
 
-//     // Perform matrix-vector multiplication y = alpha * A * x + beta * y
-
-//     cudaEventRecord(start);
-//     // d_a is stored in column MAJOR
-
-//     // timing
-//     cudaEventRecord(stop);
-//     cudaEventSynchronize(stop);
-//     cudaEventElapsedTime(&ms, start, stop);
-//     printf("Kernel execution time: %.6f ms\n", ms);
 
 
     // Output result
@@ -263,12 +246,6 @@ int main(int argc, char* argv[]) {
 
 
 
-    // // Cleanup
-    // cudaFree(d_A);
-    // cudaFree(d_x);
-    // cudaFree(d_y);
-
-    // Destroy cuBLAS handle
     cublasDestroy(handle);
 
     return 0;

@@ -137,6 +137,7 @@ __global__ void decmpressAndMultiply(int8_t* dst, int8_t* vec,
 
             w = min_value + r;
 
+            // __dp4a(srcA, srcB,c); // see https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__INTRINSIC__INT.html#group__cuda__math__intrinsic__int_1ga933213059df6da2de206771f145ac2f8
 
 
             res += w * vec[j]; // perform scalar addition
@@ -169,8 +170,8 @@ int8_t* CompressedMatrix::decompressAndMult(int8_t* result, int8_t* vector){
 
 int main() {
     // Open the binary file
-    // std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
-    std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
+    std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
+    // std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
     std::ifstream file(filename, std::ios::binary);
     
     // for timing
@@ -233,8 +234,8 @@ int main() {
             // std::cout << "Rows: " << matrix.rows << std::endl;
             // std::cout << "Columns: " << matrix.cols << std::endl;
             // printf("Min value %i\n", matrix.min_value);
-            assert(matrix.rows == 1024);
-            assert(matrix.cols == 1024);
+            // assert(matrix.rows == 1024);
+            // assert(matrix.cols == 1024);
             checkCUDAError("sizes misalign");
             rows = matrix.rows;
         }

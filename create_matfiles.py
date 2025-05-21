@@ -8,7 +8,7 @@ import sys
 
 
 np.random.seed(20250310)
-w = 4096
+w = 1024
 sigma = 1/np.sqrt(w)
 
 n = 10
