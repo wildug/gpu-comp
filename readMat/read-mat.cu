@@ -97,20 +97,17 @@ public:
         file.read(reinterpret_cast<char*>(&G), sizeof(uint8_t));
 
         uint32_t cdf_len = G + 1;
-        uint8_t* cdf_data;
-        cudaMallocManaged(&cdf_data, cdf_len * sizeof(uint8_t));
+        uint8_t* cdf_data = new uint8_t[cdf_len];
         file.read(reinterpret_cast<char*>(cdf_data), cdf_len);
         
         if (cdf_len % 2 == 1) {
             file.seekg(1, std::ios::cur);
         }
 
-        uint8_t* ppf_data;
-        cudaMallocManaged(&ppf_data, 256*sizeof(uint8_t));
+        uint8_t* ppf_data = new uint8_t[256];;
         file.read( reinterpret_cast<char*>(ppf_data), 256);
         
-        uint16_t* payload;
-        cudaMallocManaged(&payload, payload_size * sizeof(uint16_t));
+        uint16_t* payload = new uint16_t[payload_size];
         file.read(reinterpret_cast<char*>(payload), payload_size * sizeof(uint16_t));
         
         if (payload_size % 2 == 1) {
@@ -169,7 +166,8 @@ __global__ void decmpressAndMultiply(int32_t* dst, int8_t* vec,
 
             w = min_value + r;
 
-            // __dp4a(srcA, srcB,c); // see https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__INTRINSIC__INT.html#group__cuda__math__intrinsic__int_1ga933213059df6da2de206771f145ac2f8
+            // __dp4a(srcA, srcB,c); 
+            // see https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__INTRINSIC__INT.html#group__cuda__math__intrinsic__int_1ga933213059df6da2de206771f145ac2f8
 
 
             res += w * vec[j]; // perform scalar addition
@@ -233,9 +231,14 @@ int main() {
     file.read(reinterpret_cast<char*>(&max_word_count), sizeof(max_word_count));
     file.read(reinterpret_cast<char*>(&len_v), sizeof(len_v));
 
-    cudaMallocManaged(&v0, len_v * sizeof(uint8_t));
 
-    file.read(reinterpret_cast<char*>(v0), len_v*sizeof(uint8_t));
+    int8_t* h_v0 = new int8_t[len_v];
+    file.read(reinterpret_cast<char*>(h_v0), len_v*sizeof(uint8_t));
+
+    cudaMalloc(&v0, sizeof(int8_t)*len_v);
+    cudaMemcpy(v0, h_v0,sizeof(int8_t)*len_v,  cudaMemcpyHostToDevice);
+
+    cudaMalloc(&vec,sizeof(int8_t)*len_v);
 
     std::cout << "Number of matrices: " << num_matrices << std::endl;
     std::cout << "Max word-count: " << max_word_count << std::endl;
@@ -273,13 +276,44 @@ int main() {
     int32_t* d_result32;
     cudaMalloc(&d_result32, sizeof(int32_t)* max_rows); 
     
-    for (int l=0; l< 1; l++){ // outer loop for benchmarking
+    // alternatively put this inside benchmarking loop
+    // MEMCPY LOOP, move cudaEventRecord above or below
+    for (int k = 0; k<num_matrices; k++){
+        CompressedMatrix& matrix = encoded_matrices[k];
+        uint8_t* cdf_data;
+        uint8_t* ppf_data;
+        uint16_t* payload;
+
+        // malloc
+        checkCUDAError("before Malloc");
+        cudaMalloc((void**)&cdf_data, sizeof(uint8_t)*(matrix.G +1));
+        cudaMalloc(&ppf_data, 256*sizeof(uint8_t));
+        cudaMalloc(&payload, matrix.payload_size * sizeof(uint16_t));
+        checkCUDAError("after Malloc");
+
+        // memcpy
+        cudaMemcpy(cdf_data, matrix.cdf_data,sizeof(uint8_t)*(matrix.G +1), cudaMemcpyHostToDevice);
+        cudaMemcpy(ppf_data, matrix.ppf_data,sizeof(uint8_t)*256, cudaMemcpyHostToDevice);
+        cudaMemcpy(payload, matrix.payload, matrix.payload_size * sizeof(uint16_t), cudaMemcpyHostToDevice);
+
+        checkCUDAError("after Memcpy");
+
+
+        // set the *device* pointer as object attribute
+        matrix.cdf_data = cdf_data;
+        matrix.ppf_data = ppf_data;
+        matrix.payload = payload;
+    }
+
+    for (int l=0; l< 10; l++){ // outer loop for benchmarking
+
+        cudaMemcpy(vec, v0, sizeof(int8_t)*len_v, cudaMemcpyDeviceToDevice);
 
         cudaEventRecord(start);
 
         float v_delta = 1;
-        vec = v0;
 
+        // COMPUTE LOOP
         for (int k = 0; k<num_matrices; k++){
             CompressedMatrix matrix = encoded_matrices[k];
 
@@ -295,6 +329,7 @@ int main() {
             checkCUDAError("sizes misalign");
             rows = matrix.rows;
         }
+        cudaDeviceSynchronize();
 
 
 
@@ -306,8 +341,16 @@ int main() {
         cudaEventRecord(stop);
         cudaEventSynchronize(stop);
         cudaEventElapsedTime(&ms, start, stop);
-
         printf("%f ms\n", ms);
+        
+        // alternatively put this outside of benchmarking loop
+    }
+
+    for (int k = 0; k<num_matrices; k++){
+        CompressedMatrix matrix = encoded_matrices[k];
+        cudaFree(matrix.cdf_data);
+        cudaFree(matrix.ppf_data);
+        cudaFree(matrix.payload);
     }
     // show result
     printf("[");
