@@ -62,19 +62,26 @@ class CompressedMatrix {
 public:
     uint32_t rows, cols;
     float grid_spacing;
-    uint32_t* cursors;
     int8_t min_value;
     uint8_t G;
+    // host array pointers
+    uint32_t* cursors;
     uint8_t* cdf_data;
     uint8_t* ppf_data;
     uint16_t* payload;
     uint32_t payload_size;
 
+    // device array pointers
+    uint32_t* d_cursors;
+    uint8_t* d_cdf_data;
+    uint8_t* d_ppf_data;
+    uint16_t* d_payload;
+
     CompressedMatrix(uint32_t r, uint32_t c, float gs, uint32_t* cur,
                       int8_t minVal, uint8_t G, uint8_t* cdf, uint8_t* ppf, uint16_t* pay, uint32_t pay_size)
         : rows(r), cols(c), grid_spacing(gs), cursors(cur), min_value(minVal), G(G),
-          cdf_data(cdf), ppf_data(ppf), payload(pay), payload_size(pay_size) {}
-
+          cdf_data(cdf), ppf_data(ppf), payload(pay), payload_size(pay_size), d_cursors(nullptr), d_cdf_data(nullptr),
+           d_ppf_data(nullptr), d_payload(nullptr){}
 
     __host__ static CompressedMatrix deserialize(std::ifstream& file) {
         uint32_t rows, cols;
@@ -87,8 +94,12 @@ public:
         file.read(reinterpret_cast<char*>(&cols), sizeof(cols));
         file.read(reinterpret_cast<char*>(&grid_spacing), sizeof(float));
         
+        // uint32_t* cursors = new uint32_t[rows];
+
+        // non-pageable memoryP
         uint32_t* cursors;
-        cudaMallocManaged(&cursors, rows * sizeof(uint32_t));
+        cudaMallocHost(&cursors, sizeof(uint32_t)*rows);
+
         file.read(reinterpret_cast<char*>(cursors), rows * sizeof(uint32_t));
 
         file.read(reinterpret_cast<char*>(&payload_size), sizeof(payload_size));
@@ -97,17 +108,23 @@ public:
         file.read(reinterpret_cast<char*>(&G), sizeof(uint8_t));
 
         uint32_t cdf_len = G + 1;
-        uint8_t* cdf_data = new uint8_t[cdf_len];
+        // uint8_t* cdf_data = new uint8_t[cdf_len];
+        uint8_t* cdf_data;
+        cudaMallocHost(&cdf_data, sizeof(uint8_t)*cdf_len);
         file.read(reinterpret_cast<char*>(cdf_data), cdf_len);
         
         if (cdf_len % 2 == 1) {
             file.seekg(1, std::ios::cur);
         }
 
-        uint8_t* ppf_data = new uint8_t[256];;
+        // uint8_t* ppf_data = new uint8_t[256];;
+        uint8_t* ppf_data;
+        cudaMallocHost(&ppf_data, sizeof(uint8_t)*256);
         file.read( reinterpret_cast<char*>(ppf_data), 256);
         
-        uint16_t* payload = new uint16_t[payload_size];
+        // uint16_t* payload = new uint16_t[payload_size];
+        uint16_t* payload;
+        cudaMallocHost(&payload, sizeof(uint16_t)*payload_size);
         file.read(reinterpret_cast<char*>(payload), payload_size * sizeof(uint16_t));
         
         if (payload_size % 2 == 1) {
@@ -138,8 +155,14 @@ __global__ void decmpressAndMultiply(int32_t* dst, int8_t* vec,
     int8_t w;
     uint8_t prob;
 
+    __shared__ int8_t shared_vec[4096]; // TODO NOT HARDCODE THIS NUMBER
     extern __shared__ uint8_t cdf[]; // store cdf in shared memory
     __shared__ uint8_t ppf[256];
+
+
+    for (int j = tId; j <cols; j+=blockSize ){
+        shared_vec[j] = vec[j];
+    }
 
     int32_t res = 0;
 
@@ -170,9 +193,9 @@ __global__ void decmpressAndMultiply(int32_t* dst, int8_t* vec,
             // see https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__INTRINSIC__INT.html#group__cuda__math__intrinsic__int_1ga933213059df6da2de206771f145ac2f8
 
 
-            res += w * vec[j]; // perform scalar addition
+            res += w * shared_vec[j]; // perform scalar addition
 
-            prob = (cdf[r+1] - cdf[r]) % (1<<8); // modulo 2**8 to ensure it fits in a uint8
+            prob = (cdf[r+1] - cdf[r]) & 0xFF; // modulo 2**8 to ensure it fits in a uint8
             head = (head >> 8) * prob  + (quantile -cdf[r]);
             if (head < (1<<16)){
                 head = head<<16 | payload[cursor];
@@ -191,8 +214,8 @@ float CompressedMatrix::decompressAndMult(int8_t* d_result8, int32_t* d_result32
 
     decmpressAndMultiply<<<blockGrid, threadBlock, (G+1)*sizeof(int8_t)>>>(d_result32, vector,
         this->rows, this->cols, this->grid_spacing,
-        this-> cursors, this->min_value, this->G,
-        this->cdf_data,this->ppf_data, this->payload, this->payload_size);
+        this-> d_cursors, this->min_value, this->G,
+        this->d_cdf_data,this->d_ppf_data, this->d_payload, this->payload_size);
 
 
     float abs_max = absMaxWithThrustDevice(d_result32, this->rows);
@@ -279,30 +302,36 @@ int main() {
     // alternatively put this inside benchmarking loop
     // MEMCPY LOOP, move cudaEventRecord above or below
     for (int k = 0; k<num_matrices; k++){
+        printf("%d\n",k);
         CompressedMatrix& matrix = encoded_matrices[k];
-        uint8_t* cdf_data;
-        uint8_t* ppf_data;
-        uint16_t* payload;
+        uint32_t* d_cursors;
+        uint8_t* d_cdf_data;
+        uint8_t* d_ppf_data;
+        uint16_t* d_payload;
 
         // malloc
         checkCUDAError("before Malloc");
-        cudaMalloc((void**)&cdf_data, sizeof(uint8_t)*(matrix.G +1));
-        cudaMalloc(&ppf_data, 256*sizeof(uint8_t));
-        cudaMalloc(&payload, matrix.payload_size * sizeof(uint16_t));
+        cudaMalloc(&d_cursors, sizeof(uint32_t)* matrix.rows);
+        cudaMalloc(&d_cdf_data, sizeof(uint8_t)*(matrix.G +1));
+        cudaMalloc(&d_ppf_data, 256*sizeof(uint8_t));
+        cudaMalloc(&d_payload, matrix.payload_size * sizeof(uint16_t));
+
         checkCUDAError("after Malloc");
 
         // memcpy
-        cudaMemcpy(cdf_data, matrix.cdf_data,sizeof(uint8_t)*(matrix.G +1), cudaMemcpyHostToDevice);
-        cudaMemcpy(ppf_data, matrix.ppf_data,sizeof(uint8_t)*256, cudaMemcpyHostToDevice);
-        cudaMemcpy(payload, matrix.payload, matrix.payload_size * sizeof(uint16_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_cursors, matrix.cursors, sizeof(uint32_t)*matrix.rows, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_cdf_data, matrix.cdf_data,sizeof(uint8_t)*(matrix.G +1), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_ppf_data, matrix.ppf_data,sizeof(uint8_t)*256, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_payload, matrix.payload, matrix.payload_size * sizeof(uint16_t), cudaMemcpyHostToDevice);
 
         checkCUDAError("after Memcpy");
 
 
         // set the *device* pointer as object attribute
-        matrix.cdf_data = cdf_data;
-        matrix.ppf_data = ppf_data;
-        matrix.payload = payload;
+        matrix.d_cursors = d_cursors;
+        matrix.d_cdf_data = d_cdf_data;
+        matrix.d_ppf_data = d_ppf_data;
+        matrix.d_payload =  d_payload;
     }
 
     for (int l=0; l< 10; l++){ // outer loop for benchmarking
@@ -315,7 +344,7 @@ int main() {
 
         // COMPUTE LOOP
         for (int k = 0; k<num_matrices; k++){
-            CompressedMatrix matrix = encoded_matrices[k];
+            CompressedMatrix& matrix = encoded_matrices[k];
 
             matrix.decompressAndMult(d_result, d_result32, vec, v_delta);
             checkCUDAError("after decompressing matrix");
@@ -346,11 +375,18 @@ int main() {
         // alternatively put this outside of benchmarking loop
     }
 
+    printf("freeing Memory: ");
     for (int k = 0; k<num_matrices; k++){
         CompressedMatrix matrix = encoded_matrices[k];
-        cudaFree(matrix.cdf_data);
-        cudaFree(matrix.ppf_data);
-        cudaFree(matrix.payload);
+
+        cudaFreeHost(matrix.cursors);
+        cudaFreeHost(matrix.cdf_data);
+        cudaFreeHost(matrix.ppf_data);
+        cudaFreeHost(matrix.payload);
+        cudaFree(matrix.d_cursors);
+        cudaFree(matrix.d_cdf_data);
+        cudaFree(matrix.d_ppf_data);
+        cudaFree(matrix.d_payload);
     }
     // show result
     printf("[");
@@ -360,8 +396,11 @@ int main() {
     }
     printf("]\n");
     cudaFree(d_result);
+    delete[] h_v0;
     delete[] h_result;
 
+
+    cudaDeviceReset();
     checkCUDAError("End of program.");
     
     return 0;
