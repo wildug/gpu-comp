@@ -96,7 +96,7 @@ public:
         
         // uint32_t* cursors = new uint32_t[rows];
 
-        // non-pageable memoryP
+        // non-pageable memory
         uint32_t* cursors;
         cudaMallocHost(&cursors, sizeof(uint32_t)*rows);
 
@@ -237,10 +237,17 @@ int main() {
     std::ifstream file(filename, std::ios::binary);
     
     // for timing
-    float ms = 0;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    // time including memcpy
+    float ms1 = 0;
+    cudaEvent_t start1, stop1;
+    cudaEventCreate(&start1);
+    cudaEventCreate(&stop1);
+
+    // time using on
+    float ms2 = 0;
+    cudaEvent_t start2, stop2;
+    cudaEventCreate(&start2);
+    cudaEventCreate(&stop2);
 
     if (!file) {
         std::cerr << "Error: Could not open file" << std::endl;
@@ -301,44 +308,45 @@ int main() {
     
     // alternatively put this inside benchmarking loop
     // MEMCPY LOOP, move cudaEventRecord above or below
-    for (int k = 0; k<num_matrices; k++){
-        printf("%d\n",k);
-        CompressedMatrix& matrix = encoded_matrices[k];
-        uint32_t* d_cursors;
-        uint8_t* d_cdf_data;
-        uint8_t* d_ppf_data;
-        uint16_t* d_payload;
-
-        // malloc
-        checkCUDAError("before Malloc");
-        cudaMalloc(&d_cursors, sizeof(uint32_t)* matrix.rows);
-        cudaMalloc(&d_cdf_data, sizeof(uint8_t)*(matrix.G +1));
-        cudaMalloc(&d_ppf_data, 256*sizeof(uint8_t));
-        cudaMalloc(&d_payload, matrix.payload_size * sizeof(uint16_t));
-
-        checkCUDAError("after Malloc");
-
-        // memcpy
-        cudaMemcpy(d_cursors, matrix.cursors, sizeof(uint32_t)*matrix.rows, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_cdf_data, matrix.cdf_data,sizeof(uint8_t)*(matrix.G +1), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_ppf_data, matrix.ppf_data,sizeof(uint8_t)*256, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_payload, matrix.payload, matrix.payload_size * sizeof(uint16_t), cudaMemcpyHostToDevice);
-
-        checkCUDAError("after Memcpy");
-
-
-        // set the *device* pointer as object attribute
-        matrix.d_cursors = d_cursors;
-        matrix.d_cdf_data = d_cdf_data;
-        matrix.d_ppf_data = d_ppf_data;
-        matrix.d_payload =  d_payload;
-    }
 
     for (int l=0; l< 10; l++){ // outer loop for benchmarking
 
+        cudaEventRecord(start1);
+        for (int k = 0; k<num_matrices; k++){
+            CompressedMatrix& matrix = encoded_matrices[k];
+            uint32_t* d_cursors;
+            uint8_t* d_cdf_data;
+            uint8_t* d_ppf_data;
+            uint16_t* d_payload;
+
+            // malloc
+            checkCUDAError("before Malloc");
+            cudaMalloc(&d_cursors, sizeof(uint32_t)* matrix.rows);
+            cudaMalloc(&d_cdf_data, sizeof(uint8_t)*(matrix.G +1));
+            cudaMalloc(&d_ppf_data, 256*sizeof(uint8_t));
+            cudaMalloc(&d_payload, matrix.payload_size * sizeof(uint16_t));
+
+            checkCUDAError("after Malloc");
+
+            // memcpy
+            cudaMemcpy(d_cursors, matrix.cursors, sizeof(uint32_t)*matrix.rows, cudaMemcpyHostToDevice);
+            cudaMemcpy(d_cdf_data, matrix.cdf_data,sizeof(uint8_t)*(matrix.G +1), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_ppf_data, matrix.ppf_data,sizeof(uint8_t)*256, cudaMemcpyHostToDevice);
+            cudaMemcpy(d_payload, matrix.payload, matrix.payload_size * sizeof(uint16_t), cudaMemcpyHostToDevice);
+
+            checkCUDAError("after Memcpy");
+
+
+            // set the *device* pointer as object attribute
+            matrix.d_cursors = d_cursors;
+            matrix.d_cdf_data = d_cdf_data;
+            matrix.d_ppf_data = d_ppf_data;
+            matrix.d_payload =  d_payload;
+        }
+
         cudaMemcpy(vec, v0, sizeof(int8_t)*len_v, cudaMemcpyDeviceToDevice);
 
-        cudaEventRecord(start);
+        cudaEventRecord(start2);
 
         float v_delta = 1;
 
@@ -365,28 +373,36 @@ int main() {
         checkCUDAError("Before Memcpy.");
 
         // copy 'vec' since we swapped it with d_result
+        cudaEventRecord(stop2);
         cudaMemcpy(h_result, vec, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
+        cudaEventRecord(stop1);
 
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&ms, start, stop);
-        printf("%f ms\n", ms);
+        // freeing memory is not considered here
+        cudaEventSynchronize(stop2);
         
         // alternatively put this outside of benchmarking loop
+        printf("freeing device Memory... \n");
+        for (int k = 0; k<num_matrices; k++){
+            CompressedMatrix& matrix = encoded_matrices[k];
+            cudaFree(matrix.d_cursors);
+            cudaFree(matrix.d_cdf_data);
+            cudaFree(matrix.d_ppf_data);
+            cudaFree(matrix.d_payload);
+        }
+
+        cudaEventElapsedTime(&ms1, start1, stop1);
+        cudaEventElapsedTime(&ms2, start2, stop2);
+
+        printf("Time with memcpy:    %f ms\n", ms1);
+        printf("Time without memcpy: %f ms\n", ms2);
     }
 
-    printf("freeing Memory: ");
     for (int k = 0; k<num_matrices; k++){
-        CompressedMatrix matrix = encoded_matrices[k];
-
+        CompressedMatrix& matrix = encoded_matrices[k];
         cudaFreeHost(matrix.cursors);
         cudaFreeHost(matrix.cdf_data);
         cudaFreeHost(matrix.ppf_data);
         cudaFreeHost(matrix.payload);
-        cudaFree(matrix.d_cursors);
-        cudaFree(matrix.d_cdf_data);
-        cudaFree(matrix.d_ppf_data);
-        cudaFree(matrix.d_payload);
     }
     // show result
     printf("[");
