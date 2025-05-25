@@ -232,6 +232,8 @@ float CompressedMatrix::decompressAndMult(int8_t* d_result8, int32_t* d_result32
 
 int main() {
     // Open the binary file
+    // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
+
     std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
     // std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
     std::ifstream file(filename, std::ios::binary);
@@ -309,7 +311,7 @@ int main() {
     // alternatively put this inside benchmarking loop
     // MEMCPY LOOP, move cudaEventRecord above or below
 
-    for (int l=0; l< 10; l++){ // outer loop for benchmarking
+    for (int l=0; l< 20; l++){ // outer loop for benchmarking
 
         cudaEventRecord(start1);
         for (int k = 0; k<num_matrices; k++){
@@ -374,14 +376,17 @@ int main() {
 
         // copy 'vec' since we swapped it with d_result
         cudaEventRecord(stop2);
+        cudaEventSynchronize(stop2);
+
         cudaMemcpy(h_result, vec, sizeof(int8_t)* rows, cudaMemcpyDeviceToHost);
         cudaEventRecord(stop1);
 
         // freeing memory is not considered here
-        cudaEventSynchronize(stop2);
+        cudaEventSynchronize(stop1);
+
+        cudaEventElapsedTime(&ms1, start1, stop1);
+        cudaEventElapsedTime(&ms2, start2, stop2);
         
-        // alternatively put this outside of benchmarking loop
-        printf("freeing device Memory... \n");
         for (int k = 0; k<num_matrices; k++){
             CompressedMatrix& matrix = encoded_matrices[k];
             cudaFree(matrix.d_cursors);
@@ -390,8 +395,6 @@ int main() {
             cudaFree(matrix.d_payload);
         }
 
-        cudaEventElapsedTime(&ms1, start1, stop1);
-        cudaEventElapsedTime(&ms2, start2, stop2);
 
         printf("Time with memcpy:    %f ms\n", ms1);
         printf("Time without memcpy: %f ms\n", ms2);

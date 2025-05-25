@@ -8,10 +8,10 @@ import sys
 
 
 np.random.seed(20250310)
-w = 1024
+w = 4096
 sigma = 1/np.sqrt(w)
 
-n = 10
+n = 100
 
 quantized_matrices = np.empty((n,w,w), dtype=np.int8)
 w_deltas = np.zeros(n)

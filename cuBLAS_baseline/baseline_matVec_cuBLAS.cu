@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
 
     for (int i = 0; i < len_v; ++i) {
             h_vec[i] = static_cast<float>(int_vec[i]);
-            printf("%f, ",h_vec[i]);
+            // printf("%f, ",h_vec[i]);
     }
     printf("end\n");
     cudaMalloc(&vec, sizeof(float)*len_v);
@@ -243,7 +243,7 @@ int main(int argc, char* argv[]) {
     // Output result
     std::cout << "Result vector y: ";
     for (int i = 0; i < rows; i++) {
-        std::cout << h_vec[i] << " ";
+        std::cout << h_vec[i] << ", ";
     }
     std::cout << std::endl;
 
