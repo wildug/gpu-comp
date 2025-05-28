@@ -1,0 +1,84 @@
+
+#include <cublasLt.h>
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+void int8_gemv_cublaslt(const int8_t *A_host, const int8_t *x_host, int32_t *y_host, int M, int N) {
+    int8_t *d_A, *d_x;
+    int32_t *d_y;
+    cudaMalloc(&d_A, M * N * sizeof(int8_t));
+    cudaMalloc(&d_x, N * sizeof(int8_t));
+    cudaMalloc(&d_y, M * sizeof(int32_t));
+
+    cudaMemcpy(d_A, A_host, M * N * sizeof(int8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x_host, N * sizeof(int8_t), cudaMemcpyHostToDevice);
+
+    // cuBLASLt handle
+    cublasLtHandle_t ltHandle;
+    cublasLtCreate(&ltHandle);
+
+    // Matrix descriptors
+    cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
+    cublasLtMatmulDesc_t matmulDesc;
+
+    // Dimensions
+    int m = M, n = 1, k = N;
+    int lda = N, ldb = N, ldc = 1;
+
+    // A: m x k, B: k x n, C: m x n
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8I, m, k, lda);
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8I, k, n, ldb);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32I, m, n, ldc);
+    cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32I, CUDA_R_32I);
+
+    int32_t alpha = 1;
+    int32_t beta = 0;
+
+    // Workspace
+    void *workspace = nullptr;
+    size_t workspaceSize = 1 << 20;
+    cudaMalloc(&workspace, workspaceSize);
+
+    // Heuristic algorithm search
+    cublasLtMatmulAlgo_t algo;
+    cublasLtMatmulPreference_t preference;
+    cublasLtMatmulPreferenceCreate(&preference);
+    cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize));
+
+    int returnedResults = 0;
+    cublasLtMatmulHeuristicResult_t heuristicResult;
+
+    cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Adesc, Bdesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults);
+    algo = heuristicResult.algo;
+
+    // Execute Matmul
+    cublasLtMatmul(
+        ltHandle,
+        matmulDesc,
+        &alpha,
+        d_A, Adesc,
+        d_x, Bdesc,
+        &beta,
+        d_y, Cdesc,
+        d_y, Cdesc,
+        &algo,
+        workspace, workspaceSize,
+        0
+    );
+
+    // Copy result back
+    cudaMemcpy(y_host, d_y, M * sizeof(int32_t), cudaMemcpyDeviceToHost);
+
+    // Cleanup
+    cudaFree(d_A);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(workspace);
+    cublasLtMatmulPreferenceDestroy(preference);
+    cublasLtMatmulDescDestroy(matmulDesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtDestroy(ltHandle);
+}
