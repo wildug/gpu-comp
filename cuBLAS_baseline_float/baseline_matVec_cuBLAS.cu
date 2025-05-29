@@ -57,6 +57,7 @@ public:
     uint32_t cols;
     float w_delta;
     float* data;
+    float* d_data;
 
     Matrix(uint32_t r, uint32_t c, float w_delta, float* d) : rows(r), cols(c), w_delta(w_delta), data(d) {}
 
@@ -109,7 +110,7 @@ float Matrix::mult(cublasHandle_t handle, float* result, float* vector, float v_
     cublasStatus_t stat;
     checkCUDAError("Before Sgemv");
 
-    stat = cublasSgemv(handle, CUBLAS_OP_N, rows, this->cols, &alpha, this->data, rows, vector, incx, &beta, result, incy);
+    stat = cublasSgemv(handle, CUBLAS_OP_N, rows, this->cols, &alpha, this->d_data, rows, vector, incx, &beta, result, incy);
     
     checkCUDAError("after Sgemv");
     float abs_max = absMaxWithThrustDevice(result, this->rows);
@@ -139,10 +140,21 @@ int main(int argc, char* argv[]) {
 
 
     // Initialize cuBLAS handle
-    float ms = 0;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    float ms1 = 0;
+    cudaEvent_t start1, stop1;
+    cudaEventCreate(&start1);
+    cudaEventCreate(&stop1);
+
+    // time using on
+    float ms2 = 0;
+    cudaEvent_t start2, stop2;
+    cudaEventCreate(&start2);
+    cudaEventCreate(&stop2);
+
+    cudaEventCreate(&start1);
+    cudaEventCreate(&start2);
+    cudaEventCreate(&stop1);
+    cudaEventCreate(&stop2);
 
     cublasHandle_t handle;
     cublasCreate(&handle);
@@ -160,6 +172,7 @@ int main(int argc, char* argv[]) {
 
     float* h_vec = new float[len_v];
     float* vec;
+    float* v0;
 
 
     for (int i = 0; i < len_v; ++i) {
@@ -168,7 +181,8 @@ int main(int argc, char* argv[]) {
     }
     printf("end\n");
     cudaMalloc(&vec, sizeof(float)*len_v);
-    cudaMemcpy(vec, h_vec, sizeof(float)*len_v,cudaMemcpyHostToDevice);
+    cudaMalloc(&v0, sizeof(float)*len_v);
+    cudaMemcpy(v0, h_vec, sizeof(float)*len_v,cudaMemcpyHostToDevice);
 
     checkCUDAError("after Reading");
 
@@ -178,72 +192,86 @@ int main(int argc, char* argv[]) {
         Matrix matrix = Matrix::deserialize(file);
         matrices.push_back(std::move(matrix));
     }
-
     file.close();
-    cudaEventRecord(start);
 
-    for (int k = 0; k<num_matrices; k++){
-        Matrix& matrix = matrices[k];
-        float* d_data;
-        int num_elems = matrix.rows*matrix.cols;
+    for (int l=0; l< 20; l++){ // outer loop for benchmarking
+        cudaEventRecord(start1);
+        // copy initial array to vec
+        cudaMemcpy(vec, v0, sizeof(float)*len_v,cudaMemcpyDeviceToDevice);
 
-        checkCUDAError("before Malloc");
-        cudaMalloc((void**)&d_data, sizeof(float)*num_elems);
-        checkCUDAError("after Malloc");
-        cudaMemcpy(d_data, matrix.data,sizeof(float)*num_elems, cudaMemcpyHostToDevice);
-        checkCUDAError("after Memcpy");
+        for (int k = 0; k<num_matrices; k++){
+            Matrix& matrix = matrices[k];
+            float* d_data;
+            int num_elems = matrix.rows*matrix.cols;
+
+            checkCUDAError("before Malloc");
+            cudaMalloc((void**)&d_data, sizeof(float)*num_elems);
+            checkCUDAError("after Malloc");
+            cudaMemcpy(d_data, matrix.data,sizeof(float)*num_elems, cudaMemcpyHostToDevice);
+            checkCUDAError("after Memcpy");
 
 
-        matrix.data = d_data;
+            matrix.d_data = d_data;
+        }
+
+
+        checkCUDAError("after loop");
+        int max_rows = 0;
+        for (const auto& matrix : matrices) {
+            if (matrix.rows > max_rows)
+                max_rows = matrix.rows;
+        }
+
+        printf("max_rows: %d\n", max_rows);
+
+        float* d_result;
+        float* blob;
+        cudaMalloc(&d_result, sizeof(float)*max_rows);
+
+        checkCUDAError("after allocating d_result");
+        int rows;
+
+        cudaEventRecord(start2);
+        int v_delta = 1; // scaling factor of v starts with 1
+
+        for (int k = 0; k<num_matrices; k++){
+            Matrix matrix = matrices[k];
+            rows = matrix.rows;
+            v_delta = matrix.mult(handle, d_result, vec, v_delta);
+
+            checkCUDAError("after multiplying matrix");
+            // to swap variables you need a third guy 'blob'
+            blob = vec;
+            vec = d_result;
+            d_result = blob;
+        }
+        cudaEventRecord(stop2);
+        cudaEventSynchronize(stop2);
+        cudaMemcpy(h_vec, vec, sizeof(float)*rows, cudaMemcpyDeviceToHost);
+
+        cudaEventRecord(stop1);
+        cudaEventSynchronize(stop1);
+
+
+        cudaEventElapsedTime(&ms1, start1, stop1);
+        cudaEventElapsedTime(&ms2, start2, stop2);
+        
+        for (int k = 0; k<num_matrices; k++){
+            Matrix matrix = matrices[k];
+            cudaFree(matrix.d_data);
+        }
+
+        printf("Time with memcpy:    %f ms\n", ms1);
+        printf("Time without memcpy: %f ms\n", ms2);
     }
 
-
-    checkCUDAError("after loop");
-    int max_rows = 0;
-    for (const auto& matrix : matrices) {
-        if (matrix.rows > max_rows)
-            max_rows = matrix.rows;
-    }
-
-    printf("max_rows: %d\n", max_rows);
-
-    float* d_result;
-    float* blob;
-    cudaMalloc(&d_result, sizeof(float)*max_rows);
-
-    checkCUDAError("after allocating d_result");
-    int rows;
-    int v_delta = 1; // scaling factor of v starts with 1
-
-    for (int k = 0; k<num_matrices; k++){
-        Matrix matrix = matrices[k];
-        rows = matrix.rows;
-        // cudaMalloc(&d_result, sizeof(float)* rows); //TODO allocate outside the loop
-        v_delta = matrix.mult(handle, d_result, vec, v_delta);
-
-        checkCUDAError("after multiplying matrix");
-        // to swap variables you need a third guy 'blob'
-        blob = vec;
-        vec = d_result;
-        d_result = blob;
-    }
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&ms, start, stop);
-    printf("%f ms\n", ms);
-    
-    cudaMemcpy(h_vec, vec, sizeof(float)*rows, cudaMemcpyDeviceToHost);
     cudaFree(vec);
-    for (int k = 0; k<num_matrices; k++){
-        Matrix matrix = matrices[k];
-        cudaFree(matrix.data);
-    }
 
 
 
     // Output result
     std::cout << "Result vector y: ";
-    for (int i = 0; i < rows; i++) {
+    for (int i = 0; i < len_v; i++) {
         std::cout << h_vec[i] << ", ";
     }
     std::cout << std::endl;
