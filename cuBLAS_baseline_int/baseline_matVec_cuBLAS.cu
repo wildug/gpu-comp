@@ -72,6 +72,7 @@ public:
     uint32_t cols;
     float w_delta;
     int8_t* data;
+    int8_t* d_data;
 
     Matrix(uint32_t r, uint32_t c, float w_delta, int8_t* d) : rows(r), cols(c), w_delta(w_delta), data(d) {}
 
@@ -167,12 +168,25 @@ int main(int argc, char* argv[]) {
     }
 
 
-    // Initialize cuBLAS handle
-    float ms = 0;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    // for timing
+    // time including memcpy
+    float ms1 = 0;
+    cudaEvent_t start1, stop1;
+    cudaEventCreate(&start1);
+    cudaEventCreate(&stop1);
 
+    // time using on
+    float ms2 = 0;
+    cudaEvent_t start2, stop2;
+    cudaEventCreate(&start2);
+    cudaEventCreate(&stop2);
+
+    cudaEventCreate(&start1);
+    cudaEventCreate(&start2);
+    cudaEventCreate(&stop1);
+    cudaEventCreate(&stop2);
+
+    // Initialize cuBLAS handle
     // cuBLASLt handle
     cublasLtHandle_t ltHandle;
     cublasLtCreate(&ltHandle);
@@ -189,11 +203,13 @@ int main(int argc, char* argv[]) {
     file.read(reinterpret_cast<char*>(h_vec), len_v*sizeof(uint8_t));
 
     int8_t* vec;
+    int8_t* v0;
 
 
     printf("end\n");
+    cudaMalloc(&v0, sizeof(int8_t)*len_v);
     cudaMalloc(&vec, sizeof(int8_t)*len_v);
-    cudaMemcpy(vec, h_vec, sizeof(int8_t)*len_v,cudaMemcpyHostToDevice);
+    cudaMemcpy(v0, h_vec, sizeof(int8_t)*len_v,cudaMemcpyHostToDevice);
 
     checkCUDAError("after Reading");
 
@@ -205,43 +221,6 @@ int main(int argc, char* argv[]) {
     }
 
     file.close();
-    cudaEventRecord(start);
-
-    for (int k = 0; k<num_matrices; k++){
-        Matrix& matrix = matrices[k];
-        int8_t* d_data;
-        int num_elems = matrix.rows*matrix.cols;
-
-        checkCUDAError("before Malloc");
-        cudaMalloc(&d_data, sizeof(int8_t)*num_elems);
-        checkCUDAError("after Malloc");
-        cudaMemcpy(d_data, matrix.data,sizeof(int8_t)*num_elems, cudaMemcpyHostToDevice);
-        checkCUDAError("after Memcpy");
-
-
-        matrix.data = d_data;
-    }
-
-
-    checkCUDAError("after loop");
-    int max_rows = 0;
-    for (const auto& matrix : matrices) {
-        if (matrix.rows > max_rows)
-            max_rows = matrix.rows;
-    }
-
-    printf("max_rows: %d\n", max_rows);
-
-    int32_t* d_result32;
-    int8_t* d_result8;
-    int8_t* blob;
-    cudaMalloc(&d_result32, sizeof(int32_t)*max_rows);
-    cudaMalloc(&d_result8, sizeof(int8_t)*max_rows);
-
-    checkCUDAError("after allocating d_result");
-    int rows;
-    int v_delta = 1; // scaling factor of v starts with 1
-
     // cuBLASlt
     int m = 4096, n = 1, k = 4096;
     int lda = 4096, ldb = 4096, ldc = 4096;
@@ -271,34 +250,90 @@ int main(int argc, char* argv[]) {
     cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Adesc, Bdesc, Cdesc, Cdesc, preference, 1, &heuristicResult, &returnedResults);
     algo = heuristicResult.algo;
 
-    for (int k = 0; k<num_matrices; k++){
-        Matrix matrix = matrices[k];
-        rows = matrix.rows;
-        v_delta = matrix.mult(ltHandle, d_result32, d_result8, vec, v_delta, workspace, algo);
-        checkCUDAError("after multiplying matrix");
-        blob = vec;
-        vec = d_result8;
-        d_result8 = blob;
+    int max_rows = 0;
+    for (const auto& matrix : matrices) {
+        if (matrix.rows > max_rows)
+            max_rows = matrix.rows;
     }
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&ms, start, stop);
-    printf("%f ms\n", ms);
-    checkCUDAError("after loop");
-    
-    cudaMemcpy(h_vec, vec, sizeof(int8_t)*rows, cudaMemcpyDeviceToHost);
+
+
+    for (int l=0; l< 20; l++){ // outer loop for benchmarking
+        cudaEventRecord(start1);
+
+        for (int k = 0; k<num_matrices; k++){
+            Matrix& matrix = matrices[k];
+            int8_t* d_data;
+            int num_elems = matrix.rows*matrix.cols;
+
+            checkCUDAError("before Malloc");
+            cudaMalloc(&d_data, sizeof(int8_t)*num_elems);
+            checkCUDAError("after Malloc");
+            cudaMemcpy(d_data, matrix.data,sizeof(int8_t)*num_elems, cudaMemcpyHostToDevice);
+            checkCUDAError("after Memcpy");
+
+
+            matrix.d_data = d_data;
+        }
+
+        cudaMemcpy(vec, v0, sizeof(int8_t)*len_v, cudaMemcpyDeviceToDevice);
+
+        checkCUDAError("after loop");
+
+
+        int32_t* d_result32;
+        int8_t* d_result8;
+        int8_t* blob;
+        cudaMalloc(&d_result32, sizeof(int32_t)*max_rows);
+        cudaMalloc(&d_result8, sizeof(int8_t)*max_rows);
+
+        checkCUDAError("after allocating d_result");
+        int rows;
+        cudaEventRecord(start2);
+        int v_delta = 1; // scaling factor of v starts with 1
+
+
+        for (int k = 0; k<num_matrices; k++){
+            Matrix matrix = matrices[k];
+            rows = matrix.rows;
+            v_delta = matrix.mult(ltHandle, d_result32, d_result8, vec, v_delta, workspace, algo);
+            checkCUDAError("after multiplying matrix");
+            blob = vec;
+            vec = d_result8;
+            d_result8 = blob;
+        }
+        cudaEventRecord(stop2);
+        cudaEventSynchronize(stop2);
+        checkCUDAError("after loop");
+        
+        cudaMemcpy(h_vec, vec, sizeof(int8_t)*rows, cudaMemcpyDeviceToHost);
+        cudaEventRecord(stop1);
+        cudaEventSynchronize(stop1);
+
+        cudaEventElapsedTime(&ms1, start1, stop1);
+        cudaEventElapsedTime(&ms2, start2, stop2);
+
+        checkCUDAError("before freein the data");
+        
+
+        
+        for (int k = 0; k<num_matrices; k++){
+            Matrix matrix = matrices[k];
+            cudaFree(matrix.d_data);
+        }
+        checkCUDAError("after freein the data");
+
+        printf("Time with memcpy:    %f ms\n", ms1);
+        printf("Time without memcpy: %f ms\n", ms2);
+    }
+
     cudaFree(vec);
-    for (int k = 0; k<num_matrices; k++){
-        Matrix matrix = matrices[k];
-        cudaFree(matrix.data);
-    }
 
 
 
 
     // Output result
     printf("[");
-    for (int i=0; i<rows; i++){
+    for (int i=0; i<max_rows; i++){
         // printf("Result at index %d: %d\n", i, h_result[i]);
         printf("%d,",  h_vec[i]);
     }
