@@ -234,8 +234,7 @@ int main() {
     // Open the binary file
     // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
 
-    std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices.bin";
-    // std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
+    std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
     std::ifstream file(filename, std::ios::binary);
     
     // for timing
