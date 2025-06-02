@@ -222,7 +222,6 @@ int main(int argc, char* argv[]) {
                 max_rows = matrix.rows;
         }
 
-        printf("max_rows: %d\n", max_rows);
 
         float* d_result;
         float* blob;

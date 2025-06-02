@@ -235,7 +235,7 @@ int main() {
     // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
 
     // std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
-     std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices_6144.bin";
+     std::string filename = "/home/wildug/RSP/myKernel/matrices/compressed_matrices_6144.bin";
     std::ifstream file(filename, std::ios::binary);
     
     // for timing

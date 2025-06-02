@@ -8,10 +8,10 @@ import sys
 
 
 np.random.seed(20250310)
-w = 4096
+w = 6144
 sigma = 1/np.sqrt(w)
 
-n = 100
+n = 20
 
 quantized_matrices = np.empty((n,w,w), dtype=np.int8)
 w_deltas = np.zeros(n)
@@ -75,13 +75,13 @@ def serialize_raw_matrix(file, matrix):
         file.write(b'\0') # padding for if matrix does not have an even amount of 
 
 
-with open('raw-matrices.bin', 'wb') as file:
+with open(f'raw-matrices_{w}.bin', 'wb') as file:
     serialize_file_header_raw(file, len(quantized_matrices))
     serialize_vector_raw(file, vector)
     for matrix in quantized_matrices:
         serialize_raw_matrix(file, matrix)
 
-print("wrote raw-matrices.bin")
+print(f"wrote raw-matrices_{w}.bin")
 
 def create_entropy_model(data, precision):
     min_value = data.min().item()
@@ -321,10 +321,10 @@ def serialize_vector(file, vec):
 
 max_word_count = max(m.compressed_word_count() for m in encoded_matrices)
 
-with open('compressed_matrices.bin', 'wb') as file:
+with open(f'compressed_matrices_{w}.bin', 'wb') as file:
     serialize_file_header(file, len(quantized_matrices), max_word_count)
     serialize_vector(file, vector)
     for matrix in encoded_matrices:
         matrix.serialize(file)
 
-print("finished writing compressed_matrices.bin")
+print(f"finished writing compressed_matrices_{w}.bin")

@@ -144,6 +144,7 @@ float Matrix::mult(cublasLtHandle_t ltHandle, int32_t* d_result32, int8_t* resul
     
     checkCUDAError("after Sgemv");
     float abs_max = absMaxWithThrustDevice(d_result32, this->rows);
+    printf("absmax: %f, ", abs_max);
 
     v_delta = abs_max / 127;
 

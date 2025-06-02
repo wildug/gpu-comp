@@ -24,7 +24,7 @@ if (CMAKE_BUILD_TYPE MATCHES "Debug")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -g")
 else()
   # profile
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -O3 -Xptxas=-v -lineinfo")
 endif()
 
 message("CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
