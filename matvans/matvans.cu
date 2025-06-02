@@ -155,7 +155,7 @@ __global__ void decmpressAndMultiply(int32_t* dst, int8_t* vec,
     int8_t w;
     uint8_t prob;
 
-    __shared__ int8_t shared_vec[4096]; // TODO NOT HARDCODE THIS NUMBER
+    __shared__ int8_t shared_vec[6144]; // TODO NOT HARDCODE THIS NUMBER
     extern __shared__ uint8_t cdf[]; // store cdf in shared memory
     __shared__ uint8_t ppf[256];
 
@@ -234,7 +234,8 @@ int main() {
     // Open the binary file
     // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
 
-    std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
+    // std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
+     std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices_6144.bin";
     std::ifstream file(filename, std::ios::binary);
     
     // for timing
@@ -307,7 +308,6 @@ int main() {
     int32_t* d_result32;
     cudaMalloc(&d_result32, sizeof(int32_t)* max_rows); 
     
-    // alternatively put this inside benchmarking loop
     // MEMCPY LOOP, move cudaEventRecord above or below
 
     for (int l=0; l< 20; l++){ // outer loop for benchmarking
