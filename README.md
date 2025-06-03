@@ -22,6 +22,8 @@ if you want to debug the kernel run `cmake` with
 ```bash
 mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Debug ..
 ```
+after a succesful `make` execute `./baseline` or `./matvans` 
+
 To check if a binary includes the required debug symbols, run:
 ```bash
 file binary_file
