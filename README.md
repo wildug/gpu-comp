@@ -14,7 +14,9 @@ python create_matfiles.py
 in the terminal and adapt the variables to your needs.
 
 ## Compiling your own binaries
-to compile your own binary run inside one of the three folders
+First, adapt the path in the respective kernel to the location of your dummy weights file created in step beforehand.
+ To achieve this change the `filename` string variable the respective`*.cu` files.
+To compile your own binary run inside one of the three folders
 ```bash
 mkdir build && cd build && cmake .. 
 ```
