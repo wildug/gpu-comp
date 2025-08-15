@@ -124,6 +124,8 @@ float Matrix::mult(cublasLtHandle_t ltHandle, int32_t* d_result32, int8_t* resul
     cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8I, m, k, lda);
     cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8I, k, n, ldb);
     cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_32I, m, n, ldc);
+    cublasLtOrder_t theOrder = CUBLASLT_ORDER_ROW;
+    checkCublasStatus(cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &theOrder, sizeof(theOrder) ));
     checkCublasStatus(cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32I, CUDA_R_32I));
  
 
@@ -144,7 +146,7 @@ float Matrix::mult(cublasLtHandle_t ltHandle, int32_t* d_result32, int8_t* resul
     
     checkCUDAError("after Sgemv");
     float abs_max = absMaxWithThrustDevice(d_result32, this->rows);
-    printf("absmax: %f, ", abs_max);
+    // printf("absmax: %f, ", abs_max);
 
     v_delta = abs_max / 127;
 
@@ -159,7 +161,7 @@ float Matrix::mult(cublasLtHandle_t ltHandle, int32_t* d_result32, int8_t* resul
 }
 int main(int argc, char* argv[]) {
 
-    std::string filename = "/home/wildug/RSP/myKernel/raw-matrices.bin";
+    std::string filename = "/home/wildug/RSP/myKernel/raw-matrices_4096.bin";
 
     // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
     std::ifstream file(filename, std::ios::binary);
@@ -223,8 +225,8 @@ int main(int argc, char* argv[]) {
 
     file.close();
     // cuBLASlt
-    int m = 4096, n = 1, k = 4096;
-    int lda = 4096, ldb = 4096, ldc = 4096;
+    int m = len_v, n = 1, k = len_v;
+    int lda = len_v, ldb = len_v, ldc = len_v;
 
     cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
     cublasLtMatmulDesc_t matmulDesc;

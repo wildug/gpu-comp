@@ -110,7 +110,7 @@ float Matrix::mult(cublasHandle_t handle, float* result, float* vector, float v_
     cublasStatus_t stat;
     checkCUDAError("Before Sgemv");
 
-    stat = cublasSgemv(handle, CUBLAS_OP_N, rows, this->cols, &alpha, this->d_data, rows, vector, incx, &beta, result, incy);
+    stat = cublasSgemv(handle, CUBLAS_OP_T, rows, this->cols, &alpha, this->d_data, rows, vector, incx, &beta, result, incy);
     
     checkCUDAError("after Sgemv");
     float abs_max = absMaxWithThrustDevice(result, this->rows);
@@ -131,7 +131,7 @@ float Matrix::mult(cublasHandle_t handle, float* result, float* vector, float v_
 }
 int main(int argc, char* argv[]) {
 
-    std::string filename = "/home/wildug/RSP/myKernel/raw-matrices.bin";
+    std::string filename = "/home/wildug/RSP/myKernel/raw-matrices_4096.bin";
     std::ifstream file(filename, std::ios::binary);
     if (!file) {
         std::cerr << "Error: Could not open file" << std::endl;

@@ -1,14 +1,11 @@
 import numpy as np
 from tqdm import tqdm
-import pickle
-import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 import struct
 import sys
 
 
 np.random.seed(20250310)
-w = 6144
+w = 4096
 sigma = 1/np.sqrt(w)
 
 n = 20
@@ -67,9 +64,9 @@ def serialize_raw_matrix(file, matrix):
         *matrix.shape,1.))
 
     if sys.byteorder == 'little': 
-        matrix.flatten(order="F").astype(np.int8).tofile(file) # F for FORTRAN saves matrix in column major format
+        matrix.flatten(order="C").astype(np.int8).tofile(file) # C for C-Style saves matrix in row major format
     else:
-        matrix.flatten(order="F").astype(np.int8).byteswap().tofile(file)
+        matrix.flatten(order="C").astype(np.int8).byteswap().tofile(file)
 
     if matrix.size % 2 != 0: 
         file.write(b'\0') # padding for if matrix does not have an even amount of 
