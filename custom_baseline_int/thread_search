@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+# List of block sizes to test
+THREAD_SIZES=(32 64 96 128 160 192 224 256)
+
+# Path to your .cu file
+SRC="baseline_matVec_custom.cu"
+BIN="build/baseline"
+
+# GPU arch (adjust if needed)
+ARCH="sm_61"
+
+for t in "${THREAD_SIZES[@]}"; do
+    echo "=== Testing with MAX_THREADS=${t} ==="
+
+    # Compile with different MAX_THREADS
+    nvcc -DMAX_THREADS=$t -Xcudafe "--diag_suppress=177" --Wno-deprecated-gpu-targets -arch=${ARCH} "$SRC" -o "$BIN" || { echo "Compilation failed"; exit 1; }
+    
+
+    # Run with nvprof and parse kernel timings
+    nvprof "$BIN" 2>&1 \
+      | grep vecMat_int8_blockRow \
+      | awk -v ts=$t '{print "Threads:", ts, "Avg:", $4, "Min:", $5, "Max:", $6, "Calls:", $3}'
+    
+    echo
+done
