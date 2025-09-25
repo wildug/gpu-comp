@@ -32,6 +32,19 @@ struct AbsValue {
     }
 };
 
+uint32_t hash_int8_array(int8_t* arr, int size)
+{
+    uint32_t hash = 0;
+
+    for (size_t i = 0; i < size; i++)
+    {
+        hash = (hash >> 27) | (hash << 5); // Rotate left by 5 bits
+        hash = (hash ^ *reinterpret_cast<const uint8_t *>(&arr[i])) * 0x27220A95;
+    }
+
+    return hash;
+}
+
 float absMaxWithThrustDevice(float* d_input, int n) {
     thrust::device_ptr<float> dev_ptr(d_input);
 
@@ -159,10 +172,11 @@ int main(int argc, char* argv[]) {
     cublasHandle_t handle;
     cublasCreate(&handle);
 
-    uint32_t num_matrices, len_v;
+    uint32_t num_matrices, len_v, result_hash;
     int8_t* int_vec;
 
     file.read(reinterpret_cast<char*>(&num_matrices), sizeof(num_matrices));
+    file.read(reinterpret_cast<char*>(&result_hash), sizeof(result_hash));
     file.read(reinterpret_cast<char*>(&len_v), sizeof(len_v));
 
     int_vec = new int8_t[len_v];

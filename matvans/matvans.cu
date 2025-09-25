@@ -1,4 +1,3 @@
-#include <cassert>
 #include <cstddef>
 #include <cstdio>
 #include <fstream>
@@ -26,6 +25,19 @@ __inline__ __device__ int8_t find_r(uint8_t quantile, uint8_t* cdf, int G){
     }
     return -1;
 };
+
+uint32_t hash_int8_array(int8_t* arr, int size)
+{
+    uint32_t hash = 0;
+
+    for (size_t i = 0; i < size; i++)
+    {
+        hash = (hash >> 27) | (hash << 5); // Rotate left by 5 bits
+        hash = (hash ^ *reinterpret_cast<const uint8_t *>(&arr[i])) * 0x27220A95;
+    }
+
+    return hash;
+}
 
 struct AbsValue {
     __host__ __device__
@@ -155,7 +167,7 @@ __global__ void decmpressAndMultiply(int32_t* dst, int8_t* vec,
     int8_t w;
     uint8_t prob;
 
-    __shared__ int8_t shared_vec[6144]; // TODO NOT HARDCODE THIS NUMBER
+    __shared__ int8_t shared_vec[4096]; // TODO NOT HARDCODE THIS NUMBER
     extern __shared__ uint8_t cdf[]; // store cdf in shared memory
     __shared__ uint8_t ppf[256];
 
@@ -234,8 +246,9 @@ int main() {
     // Open the binary file
     // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
 
-    // std::string filename = "/home/wildug/Downloads/compressed_matrices.bin";
-     std::string filename = "/home/wildug/RSP/myKernel/matrices/compressed_matrices_6144.bin";
+    std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices_512.bin";
+    //std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices_4096.bin";
+
     std::ifstream file(filename, std::ios::binary);
     
     // for timing
@@ -256,10 +269,11 @@ int main() {
         return 1;
     }
 
-    uint32_t num_matrices, max_word_count, len_v;
+    uint32_t num_matrices, result_hash, max_word_count, len_v;
     int8_t* v0;
     int8_t* vec;
     file.read(reinterpret_cast<char*>(&num_matrices), sizeof(num_matrices));
+    file.read(reinterpret_cast<char*>(&result_hash), sizeof(result_hash));
     file.read(reinterpret_cast<char*>(&max_word_count), sizeof(max_word_count));
     file.read(reinterpret_cast<char*>(&len_v), sizeof(len_v));
 
@@ -310,7 +324,7 @@ int main() {
     
     // MEMCPY LOOP, move cudaEventRecord above or below
 
-    for (int l=0; l< 20; l++){ // outer loop for benchmarking
+    for (int l=0; l< 2; l++){ // outer loop for benchmarking
 
         cudaEventRecord(start1);
         for (int k = 0; k<num_matrices; k++){
@@ -382,6 +396,19 @@ int main() {
 
         // freeing memory is not considered here
         cudaEventSynchronize(stop1);
+        uint32_t compute_hash = hash_int8_array(h_result, rows);
+        if (compute_hash == result_hash){
+            printf("Hashes match! (%d)\n", compute_hash);
+        }
+        else{
+            printf("Hashes *don't* match!\n");
+            printf("[");
+            for (int i=0; i<rows; i++){
+                // printf("Result at index %d: %d\n", i, h_result[i]);
+                printf("%d,",  h_result[i]);
+            }
+            printf("]\n");
+        }
 
         cudaEventElapsedTime(&ms1, start1, stop1);
         cudaEventElapsedTime(&ms2, start2, stop2);
@@ -407,12 +434,6 @@ int main() {
         cudaFreeHost(matrix.payload);
     }
     // show result
-    printf("[");
-    for (int i=0; i<rows; i++){
-        // printf("Result at index %d: %d\n", i, h_result[i]);
-        printf("%d,",  h_result[i]);
-    }
-    printf("]\n");
     cudaFree(d_result);
     delete[] h_v0;
     delete[] h_result;

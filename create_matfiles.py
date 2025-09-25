@@ -5,23 +5,39 @@ import sys
 
 
 np.random.seed(20250310)
-w = 4096
+w = 512
 sigma = 1/np.sqrt(w)
 
 n = 20
+entropy = 7 # upper bound on data entropy
 
 quantized_matrices = np.empty((n,w,w), dtype=np.int8)
 w_deltas = np.zeros(n)
-for i in range(n):
+for i in tqdm(range(n)):
     matrix = np.random.randn(w, w)* sigma
-    w_delta =  np.abs(matrix).max()/ 127
-    w_deltas[i] = w_delta
-    quantized_matrices[i,...] = np.round( matrix/ w_delta ).astype(np.int8)
+    max_value = (2**(entropy-1))-1 # for signed integer maximum value is (2**(entropy-1))-1, neglecting -2**(entropy-1)
+    w_delta =  np.abs(matrix).max()/max_value  # quantize matrices to int8 grid
+    w_deltas[i] = w_delta # store as weight delta
+    quantized_matrices[i,...] = np.round(np.round( matrix/ w_delta ) * 127 / max_value).astype(np.int8)
 
 print(f'mins: {quantized_matrices.min(axis=(1, 2))}')
 print(f'maxs: {quantized_matrices.max(axis=(1, 2))}')
 
 vector = np.round(np.random.randn(w)).astype(np.int8)
+
+def hash_int8_array(arr):
+    """Simple hasher adopted from the "FxHash" rust crate.
+    Not cryptographically secure, but _accidental_ collisions are very unlikely."""
+
+    assert arr.dtype == np.int8
+
+    hash = 0
+    for byte in arr.astype(np.uint8).ravel():
+        # rotate left by 5 bits
+        hash = ((hash >> 27) | (hash << 5)) & 0xffff_ffff
+        hash = ((hash ^ byte.item()) * 0x2722_0a95) & 0xffff_ffff
+
+    return hash
 
 
 deltas_a = np.zeros(n)
@@ -40,7 +56,10 @@ for i,mat in enumerate(quantized_matrices):
     v_int8 = (v_f32 / v_delta)
     v_int8 = np.round(v_int8) # rounding for quantization
 
+final_result = v_int8
 print(f"Output vector:{v_int8}")
+result_hash = hash_int8_array(np.array(final_result,dtype=np.int8))
+print(f"Output hash: {result_hash}")
 
 def serialize_file_header_raw(file, num_matrices): # omitting max word count
     print(f"Num_matrices: {num_matrices}")
@@ -160,49 +179,56 @@ def create_ppf(cdf, p_precision= 8):
             
 
 class AnsCoder:
-    def __init__(self, precision, word_size, compressed=[]):
+    def __init__(self, precision, word_size,  compressed=[], head_size=2):
+        # int head_size determines the size of the coder head as multiples of word_size bits
         self.precision = precision
         self.word_size = word_size
         self.word_mask = (1 << word_size) - 1
         self.quantile_mask = (1 << precision) - 1
         self.bulk = compressed.copy()
         self.head = 0
-        while len(self.bulk) != 0 and (self.head >> word_size) == 0:
-            self.head = (self.head << word_size) | self.bulk.pop()
+        self.head_size = head_size
+        self.head_mask = (1 << (word_size * head_size)) - 1
+        if compressed == []:
+            self.bulk = [0] * (head_size-1) + [1]
+        if len(compressed)>= self.head_size:
+            for i in range(self.head_size):
+                self.head = ((self.head << word_size) | int(self.bulk.pop())) & self.head_mask
 
     def push(self, symbol, cdf):
         prob = (cdf[symbol + 1] - cdf[symbol]).item()
-        if (self.head >> (2 * self.word_size - self.precision)) >= prob:
-            self.bulk.append(self.head & self.word_mask)
-            self.head >>= self.word_size
+        # this condition is true if the bits-back-trick would overflow the (head_size*word_size) bits, 
+        # since z (arbitrary point between left cdf[symbol] and right cdf[symbol]) < prob
+        if (self.head >> (self.head_size * self.word_size - self.precision)) >= prob:
+            # i = 0
+            while ((self.head >> (self.word_size)) != 0):
+                self.bulk.append(self.head & self.word_mask)
+                self.head >>= self.word_size
 
         # print(f'pushing {symbol} with prob {prob} and cdf {cdf[symbol]} onto {self.head}')
         z = self.head % prob + cdf[symbol].item()
-        self.head = ((self.head // prob) << self.precision) | z
+        self.head = (((self.head // prob) << self.precision) | z) & self.head_mask
 
-    def pop(self, cdf):
+    def pop(self, cdf, ppf):
         z = self.head & self.quantile_mask
         self.head >>= self.precision
-        symbol = cdf.searchsorted(z, side='right').item() - 1
-        prob = (cdf[symbol + 1] - cdf[symbol]).item()
-        self.head = self.head * prob + (z - cdf[symbol].item())
-        if (self.head >> self.word_size) == 0 and len(self.bulk) != 0:
-            self.head = (self.head << self.word_size) | self.bulk.pop()
+        # symbol = cdf.searchsorted(z, side='right').item() - 1
+        symbol = ppf[z]
+        prob = ((cdf[symbol + 1] - cdf[symbol]).item()) & 0xFF
+        self.head = self.head * prob + (z - cdf[symbol].item()) & self.head_mask
+        if ((self.head >> (self.word_size)) == 0) and len(self.bulk) != 0:
+            # this while loops runs head_size -1 times if bulk is nice, bulk should be nice
+            while ((self.head >> (self.head_size-1)*(self.word_size)) == 0) and len(self.bulk) != 0:
+                self.head = ((self.head << self.word_size ) | int(self.bulk.pop())) & self.head_mask
+
         return symbol
 
-    def get_compressed(self):
-        compressed = self.bulk.copy()
-        head = self.head
-        while head != 0:
-            compressed.append(head & self.word_mask)
-            head >>= self.word_size
-        return compressed
     
     def interrupt(self):
-        while self.head != 0:
+        for i in range(self.head_size):
             self.bulk.append(self.head & self.word_mask)
             self.head >>= self.word_size
-        self.head = 1 << self.word_size
+        self.head = 1 << self.word_size  # restores invariant
         return len(self.bulk)
 
 class CompressedMatrix:
@@ -285,25 +311,28 @@ class CompressedMatrix:
 
 def encode_matrix(matrix, precision = 8):
     min_value, _grid_size, cdf, _entropy, _cross_entropy = create_entropy_model(matrix, precision)
+    print(f"Entropy of matrix:       {_entropy:.4f} bits" )
+    print(f"Cross-entropy of matrix: {_cross_entropy:.4f} bits (overhead of {(_cross_entropy/_entropy)-1:.4%} to Entropy)" )
     ppf = create_ppf(cdf)
-    # print(len(cdf))
-    coder = AnsCoder(precision, 16, [0, 1])
+    coder = AnsCoder(precision, 16, compressed=[0,0,0,1])
     back_cursors = np.empty(matrix.shape[0], dtype=np.uint32)
 
     for row in range(matrix.shape[0] - 1, -1, -1): # iterates in reverse order 
-        for entry in matrix[row, ::-1]: # iterates in reverse order due to stack semantics of ANS
+        for i,entry in enumerate(matrix[row, ::-1]): # iterates in reverse order due to stack semantics of ANS
             coder.push(entry.item() - min_value, cdf)
         back_cursors[row] = coder.interrupt()
     
     payload = np.array(coder.bulk[::-1], dtype=np.uint16)
+    bits_per_weight = len(payload)*16/ (matrix.shape[0]*matrix.shape[1])
+    print(f"Bits per Weight:         {bits_per_weight:.4f} bits (overhead of {(bits_per_weight/_cross_entropy)-1:.4%} to Cross-Entropy)")
     cursors = len(payload) - back_cursors
     return CompressedMatrix(matrix.shape[0], matrix.shape[1], 1.0, cursors, min_value, cdf,ppf, payload) # 1 here is for debugging purposes?
 
 encoded_matrices = [encode_matrix(matrix) for matrix in tqdm(quantized_matrices)]
 
-def serialize_file_header(file, num_matrices, max_word_count):
-    print(f"Num_matrices: {num_matrices}, Max_word_count: {max_word_count}")
-    file.write(struct.pack('<LL', num_matrices, max_word_count))
+def serialize_file_header(file, num_matrices, result_hash, max_word_count):
+    print(f"Num_matrices: {num_matrices}, Result_hash: {result_hash}, Max_word_count: {max_word_count}")
+    file.write(struct.pack('<LLL', num_matrices, result_hash, max_word_count))
 
 def serialize_vector(file, vec):
     print(f"len_v: {len(vec)}")
@@ -319,7 +348,7 @@ def serialize_vector(file, vec):
 max_word_count = max(m.compressed_word_count() for m in encoded_matrices)
 
 with open(f'compressed_matrices_{w}.bin', 'wb') as file:
-    serialize_file_header(file, len(quantized_matrices), max_word_count)
+    serialize_file_header(file, len(quantized_matrices), result_hash, max_word_count)
     serialize_vector(file, vector)
     for matrix in encoded_matrices:
         matrix.serialize(file)

@@ -25,7 +25,9 @@
 
 #define EPSILON 1e-5 
 #define MAX_BLOCKS 256
-#define MAX_THREADS 64
+#ifndef MAX_THREADS
+#define MAX_THREADS 128
+#endif
 
 #define VERBOSE
 
@@ -37,6 +39,19 @@ inline void checkCublasStatus(cublasStatus_t status) {
         printf("cuBLAS API failed with status %s\n", cublasLtGetStatusString(status));
         throw std::logic_error("cuBLAS API failed");
     }
+}
+
+uint32_t hash_int8_array(int8_t* arr, int size)
+{
+    uint32_t hash = 0;
+
+    for (size_t i = 0; i < size; i++)
+    {
+        hash = (hash >> 27) | (hash << 5); // Rotate left by 5 bits
+        hash = (hash ^ *reinterpret_cast<const uint8_t *>(&arr[i])) * 0x27220A95;
+    }
+
+    return hash;
 }
 
 struct AbsValue {
@@ -53,7 +68,7 @@ float absMaxWithThrustDevice(int32_t* d_input, int n) {
         dev_ptr, dev_ptr + n,
         AbsValue(),              // transform: fabs(x)
         0.0f,                    // init
-        thrust::maximum<int32_t>() // reduce: max
+        thrust::maximum<float>() // reduce: max
     );
 }
 
@@ -65,52 +80,283 @@ __global__ void normalizeAndRoundtoInt8(int32_t* res32, int8_t* res8, float scal
         float afl = static_cast<float>(a);
 
         a = __float2int_rn(afl/ scalar);
+        a = max(-128, min(127, a));
         res8[idx] = static_cast<int8_t>(a);
     }
 }
 
 
-__global__ void vecMat_int8(int32_t*  _dst, const int8_t*  _mat, const int8_t*  _v, int _w, int _h) {
+// CHAT CODE
 
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int vecPack = 4;
-    int res = 0;
+#ifndef WARP_SIZE
+#define WARP_SIZE 32
+#endif
 
-    extern __shared__ int32_t vec_shared[];  // shared memory buffer for vector
-    int4* dst4 = reinterpret_cast<int4*>(vec_shared);
 
-    for (int i = threadIdx.x; i < _w/16; i += blockDim.x) {
-        dst4[i] = *(reinterpret_cast<const int4*>(_v+ i*16));
+
+
+
+__global__ void vecMat_int8_warpRows(
+    int32_t* __restrict__ dst,
+    const int8_t* __restrict__ mat, // row-major [h x w]
+    const int8_t* __restrict__ v,
+    int w, int h)
+{
+    // Warp bookkeeping
+    const int tid   = threadIdx.x;
+    const int warp  = tid / WARP_SIZE;
+    const int lane  = tid % WARP_SIZE;
+
+    // One warp == one row
+    const int warpsPerBlock = blockDim.x / WARP_SIZE;
+    const int row = blockIdx.x * warpsPerBlock + warp;
+    if (row >= h) return;
+
+    // ---- Load vector into shared (int32-packed) once per block ----
+    extern __shared__ __align__(16) int32_t sV32[];       // size >= w/4
+    int4* sV128 = reinterpret_cast<int4*>(sV32);
+
+    // Cooperatively load with 128-bit transactions
+    const int nChunks128 = w / 16;          // 16 bytes per int4
+    for (int i = tid; i < nChunks128; i += blockDim.x) {
+        const int4 vv = *(reinterpret_cast<const int4*>(v) + i);
+        sV128[i] = vv; // 16B store to shared
     }
-
-    // extern __shared__ int8_t vec_shared[];  // shared memory buffer for vector
-                                            //
-    // for (int i = threadIdx.x; i < _w; i += blockDim.x) {
-    //     vec_shared[i] = _v[i];
-    // }
-
-    // extern __shared__ int32_t vec_shared[];  // shared memory buffer for vector
-    // for (int i = threadIdx.x; i < _w/4; i += blockDim.x) {
-    //     vec_shared[i] = *(reinterpret_cast<const int*>(_v+ i*vecPack));
-    // }
-
     __syncthreads();
 
-    if (row >= _h) return;
-    for (int i = 0; i < _w/vecPack; i++){
-        int idx = i * vecPack;                
-        int a = *(reinterpret_cast<const int*>(_mat + row * _w + idx));
-        // FOR 8-bit INTEGER array vec_shared
-        //int b = *(reinterpret_cast<const int*>(vec_shared + idx));
-        // FOR 32-bit INTEGER array vec_shared
-         int b = vec_shared[i];
-        res = __dp4a(a, b, res);
+    // Reinterpret row and shared vector as int32 streams
+    const int4* row4 = reinterpret_cast<const int4*>(mat + size_t(row) * w);
+    const int4* v4_shared = sV128;
+
+
+    // Each lane walks over int4 chunks with stride = warpSize
+    int acc = 0;
+    // # pragma unroll 4
+    for (int j = lane; j < nChunks128; j += WARP_SIZE) {
+        // load 16B (4x int32 packed int8) from row and vector
+        const int4 a4 = __ldg(&row4[j]);
+        const int4 b4 = v4_shared[j];
+
+        // 4 dp4a per 128-bit chunk
+        acc = __dp4a(a4.x, b4.x, acc);
+        acc = __dp4a(a4.y, b4.y, acc);
+        acc = __dp4a(a4.z, b4.z, acc);
+        acc = __dp4a(a4.w, b4.w, acc);
     }
-    _dst[row] = res;
+
+    // Warp reduction (sum partials across lanes)
+    for (int offset = WARP_SIZE/2; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+    }
 
 
+    // Lane 0 writes the row result
+    if (lane == 0) dst[row] = acc;
 }
 
+__global__ void vecMat_int8_2warpRows(
+    int32_t* __restrict__ dst,
+    const int8_t* __restrict__ mat, // row-major [h x w]
+    const int8_t* __restrict__ v,
+    int w, int h)
+{
+    // Warp bookkeeping
+    const int tidx   = threadIdx.x;
+    const int tidy   = threadIdx.y;
+    const int warp  = tidx / WARP_SIZE;
+    const int lane  = tidx % WARP_SIZE;
+    //
+    // into how many peaces do we cut each row
+    const int cuts = blockDim.y;
+
+    // One block == one row
+    const int warpsPerBlock = (blockDim.x * blockDim.y) / WARP_SIZE;
+    const int row = (blockIdx.x * blockDim.x + warp);
+    if (row >= h) return;
+
+    // ---- Load vector into shared (int32-packed) once per block ----
+    extern __shared__ __align__(16) int32_t sV32[];       // size >= w/4
+    int4* sV128 = reinterpret_cast<int4*>(sV32);
+
+    // Cooperatively load with 128-bit transactions
+    const int nChunks128 = w / (16*cuts);          // 16 bytes per int4
+    for (int i = tidx+ tidy * nChunks128; i < (tidy+1) * nChunks128; i += blockDim.x) {
+        const int4 vv = *(reinterpret_cast<const int4*>(v) + i);
+        sV128[i] = vv; // 16B store to shared
+    }
+    __syncthreads();
+
+    // Reinterpret row and shared vector as int32 streams
+    const int4* row4 = reinterpret_cast<const int4*>(mat + size_t(row) * w);
+    const int4* v4_shared = sV128;
+
+
+    // Each lane walks over int4 chunks with stride = warpSize
+    int acc = 0;
+    for (int j = lane; j < nChunks128; j += WARP_SIZE) {
+        // load 16B (4x int32 packed int8) from row and vector
+        const int4 a4 = __ldg(&row4[j]);
+        const int4 b4 = v4_shared[j];
+
+        // 4 dp4a per 128-bit chunk
+        acc = __dp4a(a4.x, b4.x, acc);
+        acc = __dp4a(a4.y, b4.y, acc);
+        acc = __dp4a(a4.z, b4.z, acc);
+        acc = __dp4a(a4.w, b4.w, acc);
+    }
+
+    // Warp reduction (sum partials across lanes)
+    for (int offset = WARP_SIZE/2; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+    }
+
+
+    // Each warp leader writes to shared memory
+    __shared__ int warpSums[32];  // enough for up to 1024 threads
+    if (lane == 0) warpSums[warp] = acc;
+    __syncthreads();
+
+    // Let warp 0 reduce the warpSums
+    if (warp == 0) {
+        int blockAcc = (tidx < (blockDim.x >> 5)) ? warpSums[lane] : 0;
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            blockAcc += __shfl_down_sync(0xffffffff, blockAcc, offset);
+        }
+        if (lane == 0) dst[row] = blockAcc;
+    }
+}
+
+__global__ void vecMat_int8_blockRow(
+    int32_t* __restrict__ dst,
+    const int8_t* __restrict__ mat, // [h x w], row-major
+    const int8_t* __restrict__ v,
+    int w, int h)
+{
+    extern __shared__ int32_t sV32[];  // shared vector copy (ceil(w/4))
+    int4* sV128 = reinterpret_cast<int4*>(sV32);
+
+    const int row = blockIdx.x;        // one row per block
+    if (row >= h) return;
+
+    const int tid  = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid>> 5;
+
+    // ---- Copy vector v into shared memory cooperatively ----
+    const int nChunks128 = w / 16;
+    for (int i = tid; i < nChunks128; i += blockDim.x) {
+        sV128[i] = reinterpret_cast<const int4*>(v)[i];
+    }
+    __syncthreads();
+
+    // ---- Compute local partial sum ----
+    int acc = 0;
+    const int4* row4 = reinterpret_cast<const int4*>(mat + size_t(row) * w);
+
+    // stride through int4 chunks
+    for (int j = tid; j < nChunks128; j += blockDim.x) {
+        const int4 a4 = row4[j];
+        const int4 b4 = sV128[j];
+        acc = __dp4a(a4.x, b4.x, acc);
+        acc = __dp4a(a4.y, b4.y, acc);
+        acc = __dp4a(a4.z, b4.z, acc);
+        acc = __dp4a(a4.w, b4.w, acc);
+    }
+
+    // Handle tail (when w not divisible by 16)
+    const int tailStart = nChunks128 * 16;
+    for (int k = tailStart + tid; k < w; k += blockDim.x) {
+        acc += int(mat[row * w + k]) * int(v[k]);
+    }
+
+    // ---- Block-wide reduction ----
+    // First do warp-level reduction
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+    }
+
+    // Each warp leader writes to shared memory
+    __shared__ int warpSums[32];  // enough for up to 1024 threads
+    if (lane == 0) warpSums[warp] = acc;
+    __syncthreads();
+
+    // Let warp 0 reduce the warpSums
+    if (warp == 0) {
+        // if tid smaller than blockDim.x / 32 access warpSums[lane]
+        int blockAcc = (tid < (blockDim.x >> 5)) ? warpSums[lane] : 0;
+        // 16 is warpsize / 2
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            blockAcc += __shfl_down_sync(0xffffffff, blockAcc, offset);
+        }
+        if (lane == 0) dst[row] = blockAcc;
+    }
+}
+
+__global__ void vecMat_int8_blockRow2(
+    int32_t* __restrict__ dst,
+    const int8_t* __restrict__ mat, // [h x w], row-major
+    const int8_t* __restrict__ v,
+    int w, int h)
+{
+    extern __shared__ int32_t sV32[];  // shared vector copy (ceil(w/4))
+    int4* sV128 = reinterpret_cast<int4*>(sV32);
+
+    const int cuts = blockDim.y;        // how many cuts along row
+
+    const int row = blockIdx.x;        // one row per block
+    const int cut = blockIdx.y;        // which cut along row
+    if (row >= h) return;
+
+    const int tidx = threadIdx.x;
+    const int tidy  = threadIdx.y;
+    const int lane = tidx & 31;
+    const int warp = (tidx >> 5) + cut * blockDim.x;
+
+    // ---- Copy vector v into shared memory cooperatively ----
+    const int nChunks128 = (w / (16 * cuts)) * (cut + 1);
+    const int start = (w / (16 * cuts)) * cut + tidx;
+    for (int i = start; i < nChunks128; i += blockDim.x) {
+        sV128[i] = reinterpret_cast<const int4*>(v)[i];
+    }
+    __syncthreads();
+
+    // ---- Compute local partial sum ----
+    int acc = 0;
+    const int4* row4 = reinterpret_cast<const int4*>(mat + size_t(row) * w);
+
+    // stride through int4 chunks
+    for (int j = start; j < nChunks128; j += blockDim.x) {
+        const int4 a4 = row4[j];
+        const int4 b4 = sV128[j];
+        acc = __dp4a(a4.x, b4.x, acc);
+        acc = __dp4a(a4.y, b4.y, acc);
+        acc = __dp4a(a4.z, b4.z, acc);
+        acc = __dp4a(a4.w, b4.w, acc);
+    }
+
+
+    // ---- Block-wide reduction ----
+    // First do warp-level reduction
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+    }
+
+    // Each warp leader writes to shared memory
+    __shared__ int warpSums[32];  // enough for up to 1024 threads
+    if (lane == 0) warpSums[warp] = acc;
+    __syncthreads();
+
+    // Let warp 0 reduce the warpSums
+    if (warp == 0) {
+        // if tid smaller than blockDim.x / 32 access warpSums[lane]
+        int blockAcc = (tidx < (blockDim.x >> 5)) ? warpSums[lane] : 0;
+        // 16 is warpsize / 2
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            blockAcc += __shfl_down_sync(0xffffffff, blockAcc, offset);
+        }
+        if (lane == 0) dst[row] = blockAcc;
+    }
+}
 
 class Matrix{
 public:
@@ -159,9 +405,15 @@ float Matrix::mult(int32_t* d_result32, int8_t* result, int8_t* vector, float v_
 
     checkCUDAError("Before Sgemv");
     int blocks = (rows+ MAX_THREADS - 1) / MAX_THREADS;
-    dim3 blockGrid(blocks);
+
+    // int warpsPerBlock = 4;
+    // dim3 grid( (rows + warpsPerBlock - 1) / warpsPerBlock );
+    // dim3 block(warpsPerBlock * 32);
+    // vecMat_int8_warpRows<<<grid,block, cols*sizeof(int8_t)>>>(d_result32, this->d_data, vector, cols, rows);
+
+    dim3 blockGrid(rows);
     dim3 threadBlock(MAX_THREADS);
-    vecMat_int8<<<blockGrid, threadBlock, cols*sizeof(int8_t)>>>(d_result32, this->d_data, vector, cols, rows);
+    vecMat_int8_blockRow<<<blockGrid, threadBlock, cols*sizeof(int8_t)>>>(d_result32, this->d_data, vector, cols, rows);
 
 
     
@@ -181,14 +433,31 @@ float Matrix::mult(int32_t* d_result32, int8_t* result, int8_t* vector, float v_
 }
 int main(int argc, char* argv[]) {
 
-    std::string filename = "/home/wildug/RSP/myKernel/raw-matrices_4096.bin";
+    // std::string filename = "/home/wildug/RSP/myKernel/raw-matrices_4096.bin";
+    std::vector<std::string> filepaths = {
+        "/home/wildug/RSP/myKernel/raw-matrices.bin",
+        "/mnt/lustre/work/bamler/bdz937/RSP/matrices/raw-matrices_4096.bin",
+        "/home/ludwigal/matrix_binfiles/raw-matrices_4096.bin",
+    };
 
-    // std::string filename = "/home/ludwigal/cuBLAS_baseline/raw-matrices.bin";
-    std::ifstream file(filename, std::ios::binary);
-    if (!file) {
-        std::cerr << "Error: Could not open file" << std::endl;
+
+    //std::string filename = "/mnt/lustre/work/bamler/bdz937/RSP/matrices/raw-matrices_4096.bin";
+    //std::string filename = "/home/ludwigal/cuBLAS_baseline/raw-matrices.bin";
+    bool opened = false;
+    std::ifstream file;
+    for (const auto& path : filepaths) {
+        file.open(path);
+        if (file.is_open()) {
+            opened = true;
+            break;
+        }
+    }
+
+    if (!opened) {
+        std::cerr << "Error: Could not open file from any of the given paths." << std::endl;
         return 1;
     }
+
 
 
     // for timing
@@ -212,10 +481,11 @@ int main(int argc, char* argv[]) {
     // Initialize cuBLAS handle
     // cuBLASLt handle
 
-    uint32_t num_matrices, len_v;
+    uint32_t num_matrices, len_v, result_hash;
     int8_t* h_vec;
 
     file.read(reinterpret_cast<char*>(&num_matrices), sizeof(num_matrices));
+    file.read(reinterpret_cast<char*>(&result_hash), sizeof(result_hash));
     file.read(reinterpret_cast<char*>(&len_v), sizeof(len_v));
 
     h_vec = new int8_t[len_v];
@@ -304,6 +574,22 @@ int main(int argc, char* argv[]) {
         cudaEventRecord(stop1);
         cudaEventSynchronize(stop1);
 
+        // check if computed output is correct using hashes 
+        uint32_t compute_hash = hash_int8_array(h_vec, rows);
+        if (compute_hash == result_hash){
+            printf("Hashes match!\n");
+        }
+        else{
+            printf("Hashes *don't* match!\n");
+            printf("[");
+            for (int i=0; i<rows; i++){
+                // printf("Result at index %d: %d\n", i, h_result[i]);
+                printf("%d,",  h_vec[i]);
+            }
+            printf("]\n");
+        }
+
+
         cudaEventElapsedTime(&ms1, start1, stop1);
         cudaEventElapsedTime(&ms2, start2, stop2);
 
@@ -322,17 +608,11 @@ int main(int argc, char* argv[]) {
     }
 
     cudaFree(vec);
+    delete[] h_vec;
 
 
 
 
-    // Output result
-    printf("[");
-    for (int i=0; i<max_rows; i++){
-        // printf("Result at index %d: %d\n", i, h_result[i]);
-        printf("%d,",  h_vec[i]);
-    }
-    printf("]\n");
 
 
 
