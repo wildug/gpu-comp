@@ -15,7 +15,7 @@ find_package(CUDAToolkit REQUIRED 11.2)
 set(CMAKE_CUDA_ARCHITECTURES 61 75)
 
 # show kernel details
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas=-v")
+# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas=-v")
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
   # debug

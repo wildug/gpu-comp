@@ -17,7 +17,7 @@ set(CMAKE_CUDA_ARCHITECTURES 61 75)
 include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 
 # show kernel details
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas=-v")
+# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xptxas=-v")
 
 if (CMAKE_BUILD_TYPE MATCHES "Debug")
   # debug
