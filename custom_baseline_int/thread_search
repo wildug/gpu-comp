@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+
+# !! ONLY MAKES SENSE FOR BLOCKROW Kernel !!
+
 # List of block sizes to test
 THREAD_SIZES=(32 64 96 128 160 192 224 256)
 
@@ -21,6 +24,5 @@ for t in "${THREAD_SIZES[@]}"; do
     nvprof "$BIN" 2>&1 \
       | grep vecMat_int8_blockRow \
       | awk -v ts=$t '{print "Threads:", ts, "Avg:", $4, "Min:", $5, "Max:", $6, "Calls:", $3}'
-    
     echo
 done
