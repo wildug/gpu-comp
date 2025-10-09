@@ -244,13 +244,25 @@ float CompressedMatrix::decompressAndMult(int8_t* d_result8, int32_t* d_result32
 
 int main() {
     // Open the binary file
-    // std::string filename = "/home/ludwigal/readMat/compressed_matrices.bin";
+    std::vector<std::string> filepaths = {
+        "/home/wildug/RSP/myKernel/compressed_matrices_512.bin",
+        "/home/ludwigal/readMat/compressed_matrices.bin"
+    };
 
-    std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices_512.bin";
-    //std::string filename = "/home/wildug/RSP/myKernel/compressed_matrices_4096.bin";
-
-    std::ifstream file(filename, std::ios::binary);
+    bool opened = false;
+    std::ifstream file;
+    for (const auto& path : filepaths) {
+        file.open(path);
+        if (file.is_open()) {
+            opened = true;
+            break;
+        }
+    }
     
+    if (!opened) {
+        std::cerr << "Error: Could not open file from any of the given paths." << std::endl;
+        return 1;
+    }
     // for timing
     // time including memcpy
     float ms1 = 0;
@@ -264,10 +276,6 @@ int main() {
     cudaEventCreate(&start2);
     cudaEventCreate(&stop2);
 
-    if (!file) {
-        std::cerr << "Error: Could not open file" << std::endl;
-        return 1;
-    }
 
     uint32_t num_matrices, result_hash, max_word_count, len_v;
     int8_t* v0;
@@ -324,7 +332,7 @@ int main() {
     
     // MEMCPY LOOP, move cudaEventRecord above or below
 
-    for (int l=0; l< 2; l++){ // outer loop for benchmarking
+    for (int l=0; l< 20; l++){ // outer loop for benchmarking
 
         cudaEventRecord(start1);
         for (int k = 0; k<num_matrices; k++){
@@ -435,6 +443,9 @@ int main() {
     }
     // show result
     cudaFree(d_result);
+    cudaFree(d_result32);
+    cudaFree(v0);
+    cudaFree(vec);
     delete[] h_v0;
     delete[] h_result;
 
